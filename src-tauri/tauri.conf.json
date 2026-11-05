@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "pixel-screen-translate",
+  "version": "0.1.0",
+  "identifier": "com.vincent.pixel-screen-translate",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Pixel 螢幕即時翻譯",
+        "width": 680,
+        "height": 540,
+        "decorations": true,
+        "transparent": false,
+        "resizable": true,
+        "visible": true
+      },
+      {
+        "label": "overlay",
+        "title": "Pixel Overlay",
+        "fullscreen": true,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "shadow": false,
+        "visible": false,
+        "url": "/?mode=overlay"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
