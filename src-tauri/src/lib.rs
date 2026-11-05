@@ -4,8 +4,9 @@ pub mod ocr;
 pub mod translate;
 
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use crate::capture::capture_primary_monitor;
 use crate::color::sample_colors;
@@ -32,15 +33,14 @@ pub struct ScreenTranslationResponse {
 
 pub struct AppState {
     pub translator: Arc<Translator>,
+    pub latest_translation: Arc<Mutex<Option<ScreenTranslationResponse>>>,
+    pub target_lang: Arc<Mutex<String>>,
 }
 
-#[tauri::command]
-async fn translate_screen(
-    target_lang: Option<String>,
-    state: tauri::State<'_, AppState>,
+pub async fn do_translate_screen(
+    translator: &Translator,
+    target_lang: &str,
 ) -> Result<ScreenTranslationResponse, String> {
-    let target = target_lang.unwrap_or_else(|| "zh-TW".to_string());
-
     // 1. Capture primary screen
     let captured = capture_primary_monitor()?;
     let scale = if captured.scale_factor > 0.0 {
@@ -61,9 +61,8 @@ async fn translate_screen(
         .map(|l| l.text.clone())
         .collect();
 
-    let translated_texts = state
-        .translator
-        .batch_translate(&original_texts, &target)
+    let translated_texts = translator
+        .batch_translate(&original_texts, target_lang)
         .await;
 
     // 4. Sample background colors and map to logical coordinates
@@ -101,20 +100,58 @@ async fn translate_screen(
 }
 
 #[tauri::command]
+async fn translate_screen(
+    target_lang: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<ScreenTranslationResponse, String> {
+    let lang = target_lang.unwrap_or_else(|| {
+        state.target_lang.lock().unwrap().clone()
+    });
+    do_translate_screen(&state.translator, &lang).await
+}
+
+#[tauri::command]
 async fn trigger_screen_translation(
     target_lang: Option<String>,
     app_handle: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<ScreenTranslationResponse, String> {
-    let result = translate_screen(target_lang, state).await?;
+    let lang = target_lang.unwrap_or_else(|| {
+        state.target_lang.lock().unwrap().clone()
+    });
 
+    let result = do_translate_screen(&state.translator, &lang).await?;
+
+    // Store latest result so overlay can fetch it anytime
+    {
+        let mut store = state.latest_translation.lock().unwrap();
+        *store = Some(result.clone());
+    }
+
+    // Show and notify overlay window
     if let Some(overlay) = app_handle.get_webview_window("overlay") {
-        overlay.show().map_err(|e| e.to_string())?;
-        overlay.set_focus().map_err(|e| e.to_string())?;
+        let _ = overlay.show();
+        let _ = overlay.set_focus();
         let _ = overlay.emit("screen-translated-data", &result);
     }
 
     Ok(result)
+}
+
+#[tauri::command]
+fn get_latest_translation(
+    state: tauri::State<'_, AppState>,
+) -> Option<ScreenTranslationResponse> {
+    state.latest_translation.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn set_target_language(
+    lang: String,
+    state: tauri::State<'_, AppState>,
+) {
+    let mut current = state.target_lang.lock().unwrap();
+    *current = lang;
 }
 
 #[tauri::command]
@@ -137,13 +174,55 @@ fn hide_overlay(app_handle: AppHandle) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let translator = Arc::new(Translator::new());
+    let latest_translation = Arc::new(Mutex::new(None));
+    let target_lang = Arc::new(Mutex::new("zh-TW".to_string()));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(AppState { translator })
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        let state = app.state::<AppState>();
+                        let app_handle = app.clone();
+                        let translator = state.translator.clone();
+                        let latest_store = state.latest_translation.clone();
+                        let target_lang = state.target_lang.lock().unwrap().clone();
+
+                        tauri::async_runtime::spawn(async move {
+                            if let Ok(result) = do_translate_screen(&translator, &target_lang).await {
+                                {
+                                    let mut store = latest_store.lock().unwrap();
+                                    *store = Some(result.clone());
+                                }
+                                if let Some(overlay) = app_handle.get_webview_window("overlay") {
+                                    let _ = overlay.show();
+                                    let _ = overlay.set_focus();
+                                    let _ = overlay.emit("screen-translated-data", &result);
+                                }
+                            }
+                        });
+                    }
+                })
+                .build(),
+        )
+        .setup(|app| {
+            // Register global shortcut Ctrl+Alt+T
+            if let Err(e) = app.global_shortcut().register("Ctrl+Alt+T") {
+                eprintln!("Failed to register Ctrl+Alt+T: {}", e);
+            }
+            Ok(())
+        })
+        .manage(AppState {
+            translator,
+            latest_translation,
+            target_lang,
+        })
         .invoke_handler(tauri::generate_handler![
             translate_screen,
             trigger_screen_translation,
+            get_latest_translation,
+            set_target_language,
             show_overlay,
             hide_overlay
         ])

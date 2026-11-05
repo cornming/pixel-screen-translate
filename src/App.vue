@@ -1,16 +1,31 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { ref, onMounted } from "vue";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import MainDashboard from "./views/MainDashboard.vue";
 import OverlayView from "./views/OverlayView.vue";
 
-const isOverlayMode = computed(() => {
+const isOverlay = ref(false);
+
+onMounted(() => {
+  try {
+    const current = getCurrentWebviewWindow();
+    if (current && current.label === "overlay") {
+      isOverlay.value = true;
+      return;
+    }
+  } catch (e) {
+    console.warn("Failed to get webview window label:", e);
+  }
+
   const params = new URLSearchParams(window.location.search);
-  return params.get("mode") === "overlay" || window.location.hash.includes("overlay");
+  if (params.get("mode") === "overlay" || window.location.hash.includes("overlay")) {
+    isOverlay.value = true;
+  }
 });
 </script>
 
 <template>
-  <OverlayView v-if="isOverlayMode" />
+  <OverlayView v-if="isOverlay" />
   <MainDashboard v-else />
 </template>
 

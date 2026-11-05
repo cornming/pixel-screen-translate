@@ -34,6 +34,7 @@ windows = { version = "0.62", features = [
     "Storage_Streams",
     "Win32_Foundation"
 ] }
+tauri-plugin-global-shortcut = "2.4.1"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

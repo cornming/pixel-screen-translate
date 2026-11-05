@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
 const targetLang = ref("zh-TW");
@@ -17,23 +17,45 @@ const languageOptions = [
   { code: "fr", label: "Français (法文)" },
 ];
 
+async function syncTargetLanguage() {
+  try {
+    await invoke("set_target_language", { lang: targetLang.value });
+  } catch (err) {
+    console.warn("Failed to set target language:", err);
+  }
+}
+
 async function startScreenTranslation() {
   try {
     isTranslating.value = true;
-    statusMessage.value = "正在截取螢幕並執行本機離線 OCR 辨識...";
+    statusMessage.value = "正在截取螢幕並執行本機離線 OCR 辨識與翻譯...";
+
+    await syncTargetLanguage();
 
     const res: any = await invoke("trigger_screen_translation", {
       targetLang: targetLang.value,
     });
 
     detectedCount.value = res.blocks.length;
-    statusMessage.value = `翻譯完成！共辨識並原地替換 ${res.blocks.length} 處文字`;
+    statusMessage.value = `翻譯完成！共辨識並原地替換 ${res.blocks.length} 處文字（覆蓋層已啟動）`;
   } catch (err: any) {
     statusMessage.value = `發生錯誤: ${err}`;
   } finally {
     isTranslating.value = false;
   }
 }
+
+async function showOverlayDirectly() {
+  try {
+    await invoke("show_overlay");
+  } catch (err) {
+    console.error("Failed to show overlay:", err);
+  }
+}
+
+onMounted(() => {
+  syncTargetLanguage();
+});
 </script>
 
 <template>
@@ -50,7 +72,7 @@ async function startScreenTranslation() {
         </div>
         <div>
           <h1 class="logo-title">Pixel 螢幕即時翻譯</h1>
-          <p class="logo-sub">Google Pixel 風格 · 原地覆蓋排版 · 本機離線 OCR</p>
+          <p class="logo-sub">Google Pixel 風格 · 原地覆蓋排版 · 全域快捷鍵 Ctrl+Alt+T</p>
         </div>
       </div>
       <div class="badge-online">離線 OCR 運作中</div>
@@ -62,7 +84,7 @@ async function startScreenTranslation() {
       <section class="card config-card">
         <label class="section-label">目標翻譯語言</label>
         <div class="select-wrapper">
-          <select v-model="targetLang" class="lang-select">
+          <select v-model="targetLang" class="lang-select" @change="syncTargetLanguage">
             <option v-for="lang in languageOptions" :key="lang.code" :value="lang.code">
               {{ lang.label }}
             </option>
@@ -82,6 +104,12 @@ async function startScreenTranslation() {
           <span v-else class="spinner"></span>
           <span>{{ isTranslating ? "正在辨識與翻譯螢幕..." : "立即進行全螢幕原地翻譯" }}</span>
         </button>
+
+        <div v-if="detectedCount !== null" class="secondary-actions">
+          <button class="secondary-btn" @click="showOverlayDirectly">
+            🔍 開啟/檢視翻譯覆蓋層
+          </button>
+        </div>
 
         <div v-if="statusMessage" class="status-box" :class="{ error: statusMessage.startsWith('發生錯誤') }">
           {{ statusMessage }}
@@ -107,18 +135,18 @@ async function startScreenTranslation() {
         </div>
 
         <div class="status-card">
-          <div class="card-icon purple">🌐</div>
+          <div class="card-icon purple">⌨️</div>
           <div class="card-info">
-            <div class="card-title">開箱即用免金鑰</div>
-            <div class="card-desc">預設直接連線翻譯，支援自訂進階 API</div>
+            <div class="card-title">全域快捷鍵</div>
+            <div class="card-desc">隨時在任何畫面按下 <kbd>Ctrl + Alt + T</kbd> 即時翻譯</div>
           </div>
         </div>
 
         <div class="status-card">
-          <div class="card-icon amber">⌨️</div>
+          <div class="card-icon amber">❌</div>
           <div class="card-info">
-            <div class="card-title">快捷鍵操作提示</div>
-            <div class="card-desc">全螢幕覆蓋層按 <kbd>Esc</kbd> 即可退出</div>
+            <div class="card-title">覆蓋層關閉</div>
+            <div class="card-desc">全螢幕覆蓋狀態下按 <kbd>Esc</kbd> 或點擊空白處關閉</div>
           </div>
         </div>
       </section>
@@ -127,7 +155,7 @@ async function startScreenTranslation() {
     <!-- Footer -->
     <footer class="dashboard-footer">
       <span>Pixel Screen Translate · v0.1.0</span>
-      <span>提示：按 Esc 或點擊螢幕空白處可隨時關閉翻譯覆蓋</span>
+      <span>隨時按下 Ctrl+Alt+T 即可直接翻譯當前螢幕</span>
     </footer>
   </div>
 </template>
@@ -149,7 +177,7 @@ async function startScreenTranslation() {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 20px 24px;
+  padding: 16px 20px;
   background: rgba(30, 41, 59, 0.6);
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
@@ -161,8 +189,8 @@ async function startScreenTranslation() {
 }
 
 .logo-icon {
-  width: 40px;
-  height: 40px;
+  width: 38px;
+  height: 38px;
   border-radius: 10px;
   background: linear-gradient(135deg, #0284c7 0%, #38bdf8 100%);
   display: flex;
@@ -173,14 +201,14 @@ async function startScreenTranslation() {
 }
 
 .logo-title {
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 700;
   margin: 0;
   color: #f1f5f9;
 }
 
 .logo-sub {
-  font-size: 12px;
+  font-size: 11px;
   color: #94a3b8;
   margin: 2px 0 0 0;
 }
@@ -191,16 +219,16 @@ async function startScreenTranslation() {
   color: #34d399;
   background: rgba(16, 185, 129, 0.15);
   border: 1px solid rgba(16, 185, 129, 0.3);
-  padding: 4px 10px;
+  padding: 3px 8px;
   border-radius: 9999px;
 }
 
 .dashboard-main {
   flex: 1;
-  padding: 20px 24px;
+  padding: 16px 20px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
   overflow-y: auto;
 }
 
@@ -208,7 +236,7 @@ async function startScreenTranslation() {
   background: rgba(30, 41, 59, 0.6);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 12px;
-  padding: 16px 20px;
+  padding: 14px 18px;
 }
 
 .section-label {
@@ -216,7 +244,7 @@ async function startScreenTranslation() {
   font-size: 13px;
   font-weight: 600;
   color: #cbd5e1;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .select-wrapper {
@@ -225,12 +253,12 @@ async function startScreenTranslation() {
 
 .lang-select {
   width: 100%;
-  padding: 10px 14px;
+  padding: 8px 12px;
   background: #1e293b;
   border: 1px solid #334155;
   color: #f8fafc;
   border-radius: 8px;
-  font-size: 14px;
+  font-size: 13px;
   outline: none;
   transition: border-color 0.15s ease;
 }
@@ -241,9 +269,9 @@ async function startScreenTranslation() {
 }
 
 .hint-text {
-  font-size: 12px;
+  font-size: 11px;
   color: #64748b;
-  margin: 8px 0 0 0;
+  margin: 6px 0 0 0;
 }
 
 .action-area {
@@ -254,25 +282,25 @@ async function startScreenTranslation() {
 
 .primary-btn {
   width: 100%;
-  padding: 14px 20px;
+  padding: 12px 18px;
   background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%);
   color: white;
   border: none;
   border-radius: 10px;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  box-shadow: 0 6px 18px rgba(37, 99, 235, 0.35);
+  gap: 8px;
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
   transition: all 0.2s ease;
 }
 
 .primary-btn:hover:not(:disabled) {
   transform: translateY(-1px);
-  box-shadow: 0 8px 22px rgba(37, 99, 235, 0.45);
+  box-shadow: 0 6px 18px rgba(37, 99, 235, 0.45);
   filter: brightness(1.08);
 }
 
@@ -281,9 +309,30 @@ async function startScreenTranslation() {
   cursor: not-allowed;
 }
 
+.secondary-actions {
+  display: flex;
+  justify-content: center;
+}
+
+.secondary-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #38bdf8;
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.secondary-btn:hover {
+  background: rgba(56, 189, 248, 0.15);
+  border-color: #38bdf8;
+}
+
 .spinner {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   border: 2px solid rgba(255, 255, 255, 0.3);
   border-top-color: white;
   border-radius: 50%;
@@ -297,12 +346,12 @@ async function startScreenTranslation() {
 }
 
 .status-box {
-  padding: 10px 14px;
+  padding: 8px 12px;
   border-radius: 8px;
   background: rgba(14, 165, 233, 0.12);
   border: 1px solid rgba(14, 165, 233, 0.25);
   color: #38bdf8;
-  font-size: 13px;
+  font-size: 12px;
   text-align: center;
 }
 
@@ -315,24 +364,24 @@ async function startScreenTranslation() {
 .grid-cards {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: 10px;
 }
 
 .status-card {
   display: flex;
   align-items: flex-start;
-  gap: 12px;
+  gap: 10px;
   background: rgba(30, 41, 59, 0.4);
   border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 10px;
-  padding: 12px 14px;
+  border-radius: 8px;
+  padding: 10px 12px;
 }
 
 .card-icon {
-  font-size: 18px;
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
+  font-size: 16px;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -340,7 +389,7 @@ async function startScreenTranslation() {
 }
 
 .card-title {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   color: #e2e8f0;
 }
@@ -354,7 +403,7 @@ async function startScreenTranslation() {
 kbd {
   background: #334155;
   color: #f1f5f9;
-  padding: 1px 6px;
+  padding: 1px 5px;
   border-radius: 4px;
   font-size: 10px;
   font-family: inherit;
@@ -364,7 +413,7 @@ kbd {
 .dashboard-footer {
   display: flex;
   justify-content: space-between;
-  padding: 12px 24px;
+  padding: 10px 20px;
   background: rgba(15, 23, 42, 0.8);
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   font-size: 11px;

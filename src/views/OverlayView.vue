@@ -12,7 +12,7 @@ interface BoundingBox {
 
 interface TranslatedBlock {
   id: number;
-  original_text: String;
+  original_text: string;
   translated_text: string;
   rect: BoundingBox;
   bg_color: string;
@@ -27,7 +27,6 @@ interface ScreenTranslationResponse {
 }
 
 const blocks = ref<TranslatedBlock[]>([]);
-const isLoading = ref(false);
 const hoveredBlock = ref<TranslatedBlock | null>(null);
 const copiedId = ref<number | null>(null);
 const copyToast = ref<{ text: string; x: number; y: number } | null>(null);
@@ -35,8 +34,11 @@ const copyToast = ref<{ text: string; x: number; y: number } | null>(null);
 let unlistenFn: (() => void) | null = null;
 
 async function closeOverlay() {
-  await invoke("hide_overlay");
-  blocks.value = [];
+  try {
+    await invoke("hide_overlay");
+  } catch (err) {
+    console.error("Failed to hide overlay:", err);
+  }
 }
 
 async function copyText(block: TranslatedBlock, event: MouseEvent) {
@@ -46,7 +48,7 @@ async function copyText(block: TranslatedBlock, event: MouseEvent) {
     copyToast.value = {
       text: "已複製譯文！",
       x: event.clientX,
-      y: event.clientY - 30,
+      y: Math.max(10, event.clientY - 30),
     };
     setTimeout(() => {
       copiedId.value = null;
@@ -59,7 +61,6 @@ async function copyText(block: TranslatedBlock, event: MouseEvent) {
 
 function calculateFontSize(rect: BoundingBox, text: string): string {
   if (!text || text.length === 0) return "14px";
-  // Estimate optimal font size to fit inside height and width
   const heightRatio = Math.max(11, Math.min(rect.height * 0.78, 26));
   const estimatedCharWidth = rect.width / (text.length * 0.9 + 1);
   const size = Math.max(11, Math.min(heightRatio, estimatedCharWidth * 1.5));
@@ -75,11 +76,24 @@ function handleKeyDown(e: KeyboardEvent) {
 onMounted(async () => {
   window.addEventListener("keydown", handleKeyDown);
 
-  // Listen to Tauri translation events
-  unlistenFn = await listen<ScreenTranslationResponse>("screen-translated-data", (event) => {
-    blocks.value = event.payload.blocks;
-    isLoading.value = false;
-  });
+  // 1. Immediately fetch latest translation if already available
+  try {
+    const latest: any = await invoke("get_latest_translation");
+    if (latest && latest.blocks && latest.blocks.length > 0) {
+      blocks.value = latest.blocks;
+    }
+  } catch (err) {
+    console.warn("Could not fetch latest translation:", err);
+  }
+
+  // 2. Listen to translation events for live updates
+  try {
+    unlistenFn = await listen<ScreenTranslationResponse>("screen-translated-data", (event) => {
+      blocks.value = event.payload.blocks;
+    });
+  } catch (err) {
+    console.error("Failed to listen to screen-translated-data:", err);
+  }
 });
 
 onUnmounted(() => {
@@ -160,7 +174,7 @@ onUnmounted(() => {
   inset: 0;
   width: 100vw;
   height: 100vh;
-  background-color: rgba(15, 23, 42, 0.08);
+  background-color: rgba(15, 23, 42, 0.05);
   user-select: none;
   cursor: default;
   overflow: hidden;
@@ -175,14 +189,14 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 16px;
-  background: rgba(30, 41, 59, 0.92);
+  background: rgba(30, 41, 59, 0.94);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   color: #f8fafc;
   padding: 8px 18px;
   border-radius: 9999px;
-  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3), 0 8px 10px -6px rgba(0, 0, 0, 0.2);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.35), 0 8px 10px -6px rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.15);
   z-index: 100000;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   animation: fadeInDown 0.2s ease-out;

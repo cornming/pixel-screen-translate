@@ -29,8 +29,7 @@
         "transparent": true,
         "alwaysOnTop": true,
         "shadow": false,
-        "visible": false,
-        "url": "/?mode=overlay"
+        "visible": false
       }
     ],
     "security": {
