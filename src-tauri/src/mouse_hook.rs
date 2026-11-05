@@ -1,11 +1,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
     UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WH_MOUSE_LL,
-    WM_KEYDOWN, WM_MOUSEWHEEL,
+    WM_KEYDOWN, WM_MOUSEWHEEL, WM_SYSKEYDOWN,
 };
 
 static mut MOUSE_HOOK: Option<HHOOK> = None;
@@ -16,6 +17,8 @@ static IS_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
 
 static mut SCROLL_CALLBACK: Option<Box<dyn Fn() + Send + Sync>> = None;
 static mut ESCAPE_CALLBACK: Option<Box<dyn Fn() + Send + Sync>> = None;
+static mut SNIP_CALLBACK: Option<Box<dyn Fn() + Send + Sync>> = None;
+static LAST_SNIP_TRIGGER: Mutex<Option<Instant>> = Mutex::new(None);
 
 unsafe extern "system" fn mouse_proc(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
     if n_code >= 0 && w_param.0 as u32 == WM_MOUSEWHEEL {
@@ -31,7 +34,8 @@ unsafe extern "system" fn mouse_proc(n_code: i32, w_param: WPARAM, l_param: LPAR
 }
 
 unsafe extern "system" fn keyboard_proc(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
-    if n_code >= 0 && w_param.0 as u32 == WM_KEYDOWN {
+    let msg = w_param.0 as u32;
+    if n_code >= 0 && (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
         let kbd = unsafe { *(l_param.0 as *const KBDLLHOOKSTRUCT) };
         if kbd.vkCode == 0x1B { // VK_ESCAPE
             if IS_OVERLAY_VISIBLE.load(Ordering::Relaxed) {
@@ -41,6 +45,31 @@ unsafe extern "system" fn keyboard_proc(n_code: i32, w_param: WPARAM, l_param: L
                     }
                 }
                 // Consume the Escape event so it closes our overlay without side-effects on underlying window
+                return LRESULT(1);
+            }
+        } else if kbd.vkCode == 0x53 { // 'S' key (0x53)
+            let ctrl = unsafe { GetAsyncKeyState(0x11) < 0 }; // VK_CONTROL
+            let alt = unsafe { GetAsyncKeyState(0x12) < 0 };  // VK_MENU (Alt)
+            let shift = unsafe { GetAsyncKeyState(0x10) < 0 }; // VK_SHIFT
+
+            // Intercept Ctrl+Alt+S or Alt+Shift+S directly via low-level hook
+            // Even if another software registered RegisterHotKey for Ctrl+Alt+S, WH_KEYBOARD_LL intercepts it first!
+            if (ctrl && alt) || (alt && shift) {
+                let now = Instant::now();
+                let mut last = LAST_SNIP_TRIGGER.lock().unwrap();
+                let should_trigger = match *last {
+                    Some(prev) => now.duration_since(prev) > Duration::from_millis(500),
+                    None => true,
+                };
+
+                if should_trigger {
+                    *last = Some(now);
+                    unsafe {
+                        if let Some(ref cb) = SNIP_CALLBACK {
+                            cb();
+                        }
+                    }
+                }
                 return LRESULT(1);
             }
         }
@@ -53,15 +82,17 @@ pub struct GlobalInputMonitor {
 }
 
 impl GlobalInputMonitor {
-    pub fn new<FStart, FEnd, FEsc>(
+    pub fn new<FStart, FEnd, FEsc, FSnip>(
         on_scroll_start: FStart,
         on_scroll_debounced: FEnd,
         on_escape_pressed: FEsc,
+        on_snip_pressed: FSnip,
     ) -> Self
     where
         FStart: Fn() + Send + Sync + 'static,
         FEnd: Fn() + Send + Sync + 'static,
         FEsc: Fn() + Send + Sync + 'static,
+        FSnip: Fn() + Send + Sync + 'static,
     {
         let is_running = Arc::new(AtomicBool::new(true));
         let is_running_clone = is_running.clone();
@@ -74,6 +105,9 @@ impl GlobalInputMonitor {
             }));
             ESCAPE_CALLBACK = Some(Box::new(move || {
                 on_escape_pressed();
+            }));
+            SNIP_CALLBACK = Some(Box::new(move || {
+                on_snip_pressed();
             }));
         }
 

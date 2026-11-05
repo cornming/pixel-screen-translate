@@ -33,7 +33,8 @@ windows = { version = "0.62", features = [
     "Graphics_Imaging",
     "Storage_Streams",
     "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging"
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse"
 ] }
 tauri-plugin-global-shortcut = "2.4.1"
 

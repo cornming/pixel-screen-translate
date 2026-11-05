@@ -287,7 +287,7 @@ onUnmounted(() => {
       </button>
 
       <!-- Snipping Mode Trigger -->
-      <button class="snip-toggle-btn" @click="startSnipping" title="區域框選翻譯 (Ctrl+Alt+S)">
+      <button class="snip-toggle-btn" @click="startSnipping" title="區域框選翻譯 (Ctrl+Alt+S / Alt+Shift+S)">
         <span>✂️ 框選翻譯</span>
       </button>
 

@@ -185,7 +185,7 @@ onMounted(async () => {
             @click="startSnippingTranslation"
           >
             <span class="btn-icon">✂️</span>
-            <span>區域框選翻譯 (Ctrl+Alt+S)</span>
+            <span>區域框選翻譯 (Ctrl+Alt+S / Alt+Shift+S)</span>
           </button>
         </div>
 
@@ -222,7 +222,7 @@ onMounted(async () => {
           <div class="card-icon purple">✂️</div>
           <div class="card-info">
             <div class="card-title">滑鼠拖曳框選</div>
-            <div class="card-desc">按 <kbd>Ctrl + Alt + S</kbd> 圈選漫畫或對話框局部翻譯</div>
+            <div class="card-desc">按 <kbd>Ctrl + Alt + S</kbd> 或 <kbd>Alt + Shift + S</kbd> 圈選局部翻譯</div>
           </div>
         </div>
 
@@ -239,7 +239,7 @@ onMounted(async () => {
     <!-- Footer -->
     <footer class="dashboard-footer">
       <span>Pixel Screen Translate · v0.4.0</span>
-      <span>滾動：Ctrl+Alt+W · 框選：Ctrl+Alt+S · 快照：Ctrl+Alt+T</span>
+      <span>滾動：Ctrl+Alt+W · 框選：Ctrl+Alt+S / Alt+Shift+S · 快照：Ctrl+Alt+T</span>
     </footer>
   </div>
 </template>

@@ -162,11 +162,7 @@ async fn trigger_screen_translation(
     Ok(result)
 }
 
-#[tauri::command]
-fn trigger_snipping_mode(
-    app_handle: AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+fn activate_snipping_mode(app_handle: &AppHandle, state: &AppState) {
     state.is_live_scroll_enabled.store(false, Ordering::SeqCst);
     state.input_monitor.set_scroll_active(false);
     state.input_monitor.set_overlay_visible(true);
@@ -177,6 +173,14 @@ fn trigger_snipping_mode(
         let _ = overlay.set_focus();
         let _ = overlay.emit("start-snipping", ());
     }
+}
+
+#[tauri::command]
+fn trigger_snipping_mode(
+    app_handle: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    activate_snipping_mode(&app_handle, &state);
     Ok(())
 }
 
@@ -371,6 +375,7 @@ pub fn run() {
     let holder_clone1 = app_handle_holder.clone();
     let holder_clone2 = app_handle_holder.clone();
     let holder_clone3 = app_handle_holder.clone();
+    let holder_clone4 = app_handle_holder.clone();
 
     let translator_for_hook = translator.clone();
     let target_lang_for_hook = target_lang.clone();
@@ -411,6 +416,12 @@ pub fn run() {
                 close_overlay_internal(app, &state);
             }
         },
+        move || {
+            if let Some(ref app) = *holder_clone4.lock().unwrap() {
+                let state = app.state::<AppState>();
+                activate_snipping_mode(app, &state);
+            }
+        },
     ));
 
     let input_monitor_clone = input_monitor.clone();
@@ -430,17 +441,8 @@ pub fn run() {
                         let shortcut_str = shortcut.to_string().to_lowercase();
 
                         if shortcut_str.contains("s") {
-                            // Snipping Drag-to-Select Mode (Ctrl+Alt+S)
-                            state.is_live_scroll_enabled.store(false, Ordering::SeqCst);
-                            state.input_monitor.set_scroll_active(false);
-                            state.input_monitor.set_overlay_visible(true);
-
-                            if let Some(overlay) = app_handle.get_webview_window("overlay") {
-                                let _ = overlay.set_ignore_cursor_events(false);
-                                let _ = overlay.show();
-                                let _ = overlay.set_focus();
-                                let _ = overlay.emit("start-snipping", ());
-                            }
+                            // Snipping Drag-to-Select Mode (Ctrl+Alt+S / Alt+Shift+S)
+                            activate_snipping_mode(&app_handle, &state);
                         } else if shortcut_str.contains("w") {
                             // Toggle Live Scroll Follow Mode (Ctrl+Alt+W)
                             let is_active = state.is_live_scroll_enabled.load(Ordering::SeqCst);
@@ -510,6 +512,7 @@ pub fn run() {
             let _ = app.global_shortcut().register("Ctrl+Alt+T");
             let _ = app.global_shortcut().register("Ctrl+Alt+W");
             let _ = app.global_shortcut().register("Ctrl+Alt+S");
+            let _ = app.global_shortcut().register("Alt+Shift+S");
             Ok(())
         })
         .manage(AppState {
