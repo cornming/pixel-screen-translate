@@ -29,9 +29,10 @@ pub struct MouseWheelMonitor {
 }
 
 impl MouseWheelMonitor {
-    pub fn new<F>(on_scroll_debounced: F) -> Self
+    pub fn new<FStart, FEnd>(on_scroll_start: FStart, on_scroll_debounced: FEnd) -> Self
     where
-        F: Fn() + Send + Sync + 'static,
+        FStart: Fn() + Send + Sync + 'static,
+        FEnd: Fn() + Send + Sync + 'static,
     {
         let is_running = Arc::new(AtomicBool::new(true));
         let is_running_clone = is_running.clone();
@@ -48,12 +49,16 @@ impl MouseWheelMonitor {
 
         // Spawn debouncing worker thread
         std::thread::spawn(move || {
-            let debounce_time = Duration::from_millis(260);
+            let debounce_time = Duration::from_millis(280);
             while is_running_clone.load(Ordering::Relaxed) {
                 if let Ok(()) = rx.recv() {
-                    // Drain any subsequent wheel ticks during continuous scroll
+                    // 1. Immediately notify that scrolling started so overlay text is instantly cleared
+                    on_scroll_start();
+
+                    // 2. Drain any subsequent wheel ticks during continuous scroll
                     while let Ok(()) = rx.recv_timeout(debounce_time) {}
-                    // Once scrolling paused for 260ms, fire the callback!
+
+                    // 3. Scrolling has stopped for 280ms: trigger clean capture and translation
                     on_scroll_debounced();
                 }
             }

@@ -7,6 +7,7 @@ pub mod translate;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
@@ -125,6 +126,12 @@ async fn trigger_screen_translation(
         state.target_lang.lock().unwrap().clone()
     });
 
+    // If overlay is already open, clear existing blocks first so they aren't captured by OCR!
+    if let Some(overlay) = app_handle.get_webview_window("overlay") {
+        let _ = overlay.emit("screen-is-scrolling", ());
+        tokio::time::sleep(Duration::from_millis(35)).await;
+    }
+
     let result = do_translate_screen(&state.translator, &lang).await?;
 
     {
@@ -153,18 +160,22 @@ fn set_live_scroll_mode(
 
     if let Some(overlay) = app_handle.get_webview_window("overlay") {
         if enabled {
-            // In live scroll mode, allow mouse wheel and clicks to pass through to the underlying app
+            // Allow mouse wheel and clicks to pass through to the underlying app
             let _ = overlay.set_ignore_cursor_events(true);
             let _ = overlay.show();
             let _ = overlay.emit("live-scroll-status", true);
 
-            // Trigger an immediate translation on enable
+            // Trigger an immediate clean scan
             let translator = state.translator.clone();
             let target_lang = state.target_lang.lock().unwrap().clone();
             let latest_store = state.latest_translation.clone();
             let overlay_clone = overlay.clone();
 
             tauri::async_runtime::spawn(async move {
+                // Clear any existing blocks first
+                let _ = overlay_clone.emit("screen-is-scrolling", ());
+                tokio::time::sleep(Duration::from_millis(35)).await;
+
                 if let Ok(result) = do_translate_screen(&translator, &target_lang).await {
                     {
                         let mut store = latest_store.lock().unwrap();
@@ -236,40 +247,49 @@ pub fn run() {
     let target_lang = Arc::new(Mutex::new("zh-TW".to_string()));
     let is_live_scroll_enabled = Arc::new(AtomicBool::new(false));
 
-    // Create Mouse Wheel Monitor with debounced callback
+    // AppHandle holder for hook callbacks
+    let app_handle_holder: Arc<Mutex<Option<AppHandle>>> = Arc::new(Mutex::new(None));
+    let holder_clone1 = app_handle_holder.clone();
+    let holder_clone2 = app_handle_holder.clone();
+
     let translator_for_hook = translator.clone();
     let target_lang_for_hook = target_lang.clone();
     let latest_for_hook = latest_translation.clone();
 
-    // AppHandle holder for hook callback
-    let app_handle_holder: Arc<Mutex<Option<AppHandle>>> = Arc::new(Mutex::new(None));
-    let holder_clone = app_handle_holder.clone();
-
-    let mouse_monitor = Arc::new(MouseWheelMonitor::new(move || {
-        let translator = translator_for_hook.clone();
-        let lang = target_lang_for_hook.lock().unwrap().clone();
-        let latest_store = latest_for_hook.clone();
-
-        if let Some(ref app) = *holder_clone.lock().unwrap() {
-            let app_clone = app.clone();
-            // First emit scrolling start so UI can fade out obsolete blocks
-            if let Some(overlay) = app_clone.get_webview_window("overlay") {
-                let _ = overlay.emit("screen-is-scrolling", ());
-            }
-
-            tauri::async_runtime::spawn(async move {
-                if let Ok(result) = do_translate_screen(&translator, &lang).await {
-                    {
-                        let mut store = latest_store.lock().unwrap();
-                        *store = Some(result.clone());
-                    }
-                    if let Some(overlay) = app_clone.get_webview_window("overlay") {
-                        let _ = overlay.emit("screen-translated-data", &result);
-                    }
+    let mouse_monitor = Arc::new(MouseWheelMonitor::new(
+        // Callback 1: on_scroll_start (IMMEDIATE on first wheel tick)
+        // Tell overlay to immediately erase all text so it never pollutes the upcoming OCR screenshot!
+        move || {
+            if let Some(ref app) = *holder_clone1.lock().unwrap() {
+                if let Some(overlay) = app.get_webview_window("overlay") {
+                    let _ = overlay.emit("screen-is-scrolling", ());
                 }
-            });
-        }
-    }));
+            }
+        },
+        // Callback 2: on_scroll_debounced (fired 280ms after scrolling completely stopped)
+        // Screen is now 100% clean and stationary: capture, OCR, and render!
+        move || {
+            let translator = translator_for_hook.clone();
+            let lang = target_lang_for_hook.lock().unwrap().clone();
+            let latest_store = latest_for_hook.clone();
+
+            if let Some(ref app) = *holder_clone2.lock().unwrap() {
+                let app_clone = app.clone();
+
+                tauri::async_runtime::spawn(async move {
+                    if let Ok(result) = do_translate_screen(&translator, &lang).await {
+                        {
+                            let mut store = latest_store.lock().unwrap();
+                            *store = Some(result.clone());
+                        }
+                        if let Some(overlay) = app_clone.get_webview_window("overlay") {
+                            let _ = overlay.emit("screen-translated-data", &result);
+                        }
+                    }
+                });
+            }
+        },
+    ));
 
     let mouse_monitor_clone = mouse_monitor.clone();
     let is_live_scroll_clone = is_live_scroll_enabled.clone();
@@ -301,15 +321,19 @@ pub fn run() {
                             }
 
                             if new_state {
-                                // Trigger immediate scan
+                                let overlay_clone = app_handle.get_webview_window("overlay");
                                 tauri::async_runtime::spawn(async move {
+                                    if let Some(ref ov) = overlay_clone {
+                                        let _ = ov.emit("screen-is-scrolling", ());
+                                        tokio::time::sleep(Duration::from_millis(35)).await;
+                                    }
                                     if let Ok(result) = do_translate_screen(&translator, &target_lang).await {
                                         {
                                             let mut store = latest_store.lock().unwrap();
                                             *store = Some(result.clone());
                                         }
-                                        if let Some(overlay) = app_handle.get_webview_window("overlay") {
-                                            let _ = overlay.emit("screen-translated-data", &result);
+                                        if let Some(ref ov) = overlay_clone {
+                                            let _ = ov.emit("screen-translated-data", &result);
                                         }
                                     }
                                 });
@@ -319,18 +343,23 @@ pub fn run() {
                             state.is_live_scroll_enabled.store(false, Ordering::SeqCst);
                             state.mouse_monitor.set_active(false);
 
+                            let overlay_clone = app_handle.get_webview_window("overlay");
                             tauri::async_runtime::spawn(async move {
+                                if let Some(ref ov) = overlay_clone {
+                                    let _ = ov.emit("screen-is-scrolling", ());
+                                    tokio::time::sleep(Duration::from_millis(35)).await;
+                                }
                                 if let Ok(result) = do_translate_screen(&translator, &target_lang).await {
                                     {
                                         let mut store = latest_store.lock().unwrap();
                                         *store = Some(result.clone());
                                     }
-                                    if let Some(overlay) = app_handle.get_webview_window("overlay") {
-                                        let _ = overlay.set_ignore_cursor_events(false);
-                                        let _ = overlay.show();
-                                        let _ = overlay.set_focus();
-                                        let _ = overlay.emit("screen-translated-data", &result);
-                                        let _ = overlay.emit("live-scroll-status", false);
+                                    if let Some(ref ov) = overlay_clone {
+                                        let _ = ov.set_ignore_cursor_events(false);
+                                        let _ = ov.show();
+                                        let _ = ov.set_focus();
+                                        let _ = ov.emit("screen-translated-data", &result);
+                                        let _ = ov.emit("live-scroll-status", false);
                                     }
                                 }
                             });

@@ -158,6 +158,7 @@ onMounted(async () => {
     });
 
     unlistenScrollFn = await listen("screen-is-scrolling", () => {
+      blocks.value = [];
       isScrollingNow.value = true;
     });
 
