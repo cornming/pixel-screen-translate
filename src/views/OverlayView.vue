@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -27,11 +27,24 @@ interface ScreenTranslationResponse {
 }
 
 const blocks = ref<TranslatedBlock[]>([]);
+const displayMode = ref<"inplace" | "sidebar">("inplace");
+const searchQuery = ref("");
 const hoveredBlock = ref<TranslatedBlock | null>(null);
+const activeSidebarBlockId = ref<number | null>(null);
 const copiedId = ref<number | null>(null);
 const copyToast = ref<{ text: string; x: number; y: number } | null>(null);
 
 let unlistenFn: (() => void) | null = null;
+
+const filteredBlocks = computed(() => {
+  if (!searchQuery.value.trim()) return blocks.value;
+  const q = searchQuery.value.toLowerCase();
+  return blocks.value.filter(
+    (b) =>
+      b.original_text.toLowerCase().includes(q) ||
+      b.translated_text.toLowerCase().includes(q)
+  );
+});
 
 async function closeOverlay() {
   try {
@@ -41,10 +54,10 @@ async function closeOverlay() {
   }
 }
 
-async function copyText(block: TranslatedBlock, event: MouseEvent) {
+async function copyText(text: string, event: MouseEvent, id?: number) {
   try {
-    await navigator.clipboard.writeText(block.translated_text);
-    copiedId.value = block.id;
+    await navigator.clipboard.writeText(text);
+    if (id !== undefined) copiedId.value = id;
     copyToast.value = {
       text: "已複製譯文！",
       x: event.clientX,
@@ -59,6 +72,17 @@ async function copyText(block: TranslatedBlock, event: MouseEvent) {
   }
 }
 
+async function copyAllTranslatedText(event: MouseEvent) {
+  const allText = blocks.value.map((b) => b.translated_text).join("\n\n");
+  if (!allText) return;
+  await copyText(allText, event);
+  copyToast.value = {
+    text: `已複製全部 ${blocks.value.length} 處譯文！`,
+    x: window.innerWidth / 2 - 80,
+    y: 80,
+  };
+}
+
 function calculateFontSize(rect: BoundingBox, text: string): string {
   if (!text || text.length === 0) return "14px";
   const heightRatio = Math.max(11, Math.min(rect.height * 0.78, 26));
@@ -67,14 +91,39 @@ function calculateFontSize(rect: BoundingBox, text: string): string {
   return `${Math.round(size)}px`;
 }
 
+function scrollToSidebarItem(id: number) {
+  activeSidebarBlockId.value = id;
+  const el = document.getElementById(`sidebar-item-${id}`);
+  if (el) {
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+}
+
+function toggleMode() {
+  displayMode.value = displayMode.value === "inplace" ? "sidebar" : "inplace";
+  try {
+    localStorage.setItem("pixel_translate_mode", displayMode.value);
+  } catch (_) {}
+}
+
 function handleKeyDown(e: KeyboardEvent) {
   if (e.key === "Escape") {
     closeOverlay();
+  } else if (e.key === "Tab") {
+    e.preventDefault();
+    toggleMode();
   }
 }
 
 onMounted(async () => {
   window.addEventListener("keydown", handleKeyDown);
+
+  try {
+    const savedMode = localStorage.getItem("pixel_translate_mode");
+    if (savedMode === "inplace" || savedMode === "sidebar") {
+      displayMode.value = savedMode;
+    }
+  } catch (_) {}
 
   // 1. Immediately fetch latest translation if already available
   try {
@@ -110,52 +159,183 @@ onUnmounted(() => {
     <div class="floating-toolbar">
       <div class="toolbar-brand">
         <span class="pulse-dot"></span>
-        <span class="brand-text">Pixel 原地翻譯</span>
+        <span class="brand-text">Pixel 螢幕翻譯</span>
       </div>
+
+      <!-- Mode Switcher -->
+      <div class="mode-switcher">
+        <button
+          class="mode-btn"
+          :class="{ active: displayMode === 'inplace' }"
+          @click="displayMode = 'inplace'"
+          title="原地遮罩替換排版"
+        >
+          📌 原地覆蓋
+        </button>
+        <button
+          class="mode-btn"
+          :class="{ active: displayMode === 'sidebar' }"
+          @click="displayMode = 'sidebar'"
+          title="側邊滾動對照清單 (按 Tab 切換)"
+        >
+          📜 側邊滾動對照
+        </button>
+      </div>
+
       <div class="toolbar-info">
-        <span>已偵測 {{ blocks.length }} 個文字區塊</span>
+        <span>共 {{ blocks.length }} 個文字區塊</span>
       </div>
+
       <div class="toolbar-actions">
-        <button class="tool-btn" @click="closeOverlay" title="關閉覆蓋層 (Esc)">
+        <button
+          v-if="displayMode === 'sidebar'"
+          class="tool-btn copy-all"
+          @click="copyAllTranslatedText($event)"
+          title="複製全部翻譯段落"
+        >
+          📋 複製全部
+        </button>
+        <button class="tool-btn close-btn" @click="closeOverlay" title="關閉覆蓋層 (Esc)">
           ✕ 關閉 (Esc)
         </button>
       </div>
     </div>
 
-    <!-- Translated Text Blocks (In-Place Replacement) -->
-    <div
-      v-for="block in blocks"
-      :key="block.id"
-      class="pixel-block"
-      :style="{
-        left: `${block.rect.x}px`,
-        top: `${block.rect.y}px`,
-        width: `${Math.max(block.rect.width, 24)}px`,
-        minHeight: `${Math.max(block.rect.height, 16)}px`,
-        backgroundColor: block.bg_color,
-        color: block.text_color,
-        fontSize: calculateFontSize(block.rect, block.translated_text),
-      }"
-      @mouseenter="hoveredBlock = block"
-      @mouseleave="hoveredBlock = null"
-      @click="copyText(block, $event)"
-      :title="`原文: ${block.original_text}\n點擊複製譯文`"
-    >
-      <span class="block-content">{{ block.translated_text }}</span>
-
-      <!-- Original Text Tooltip on Hover -->
+    <!-- ================= MODE 1: 原地替換覆蓋 (In-Place Replacement) ================= -->
+    <template v-if="displayMode === 'inplace'">
       <div
-        v-if="hoveredBlock?.id === block.id"
-        class="pixel-tooltip"
+        v-for="block in blocks"
+        :key="block.id"
+        class="pixel-block"
         :style="{
-          bottom: `${block.rect.height + 6}px`,
+          left: `${block.rect.x}px`,
+          top: `${block.rect.y}px`,
+          width: `${Math.max(block.rect.width, 24)}px`,
+          minHeight: `${Math.max(block.rect.height, 16)}px`,
+          backgroundColor: block.bg_color,
+          color: block.text_color,
+          fontSize: calculateFontSize(block.rect, block.translated_text),
         }"
+        @mouseenter="hoveredBlock = block"
+        @mouseleave="hoveredBlock = null"
+        @click="copyText(block.translated_text, $event, block.id)"
+        :title="`原文: ${block.original_text}\n點擊複製譯文`"
       >
-        <div class="tooltip-label">原文對照</div>
-        <div class="tooltip-text">{{ block.original_text }}</div>
-        <div class="tooltip-hint">單擊複製譯文</div>
+        <span class="block-content">{{ block.translated_text }}</span>
+
+        <!-- Original Text Tooltip on Hover -->
+        <div
+          v-if="hoveredBlock?.id === block.id"
+          class="pixel-tooltip"
+          :style="{
+            bottom: `${block.rect.height + 6}px`,
+          }"
+        >
+          <div class="tooltip-label">原文對照</div>
+          <div class="tooltip-text">{{ block.original_text }}</div>
+          <div class="tooltip-hint">單擊複製譯文 · 按 Tab 切換側邊滾動清單</div>
+        </div>
       </div>
-    </div>
+    </template>
+
+    <!-- ================= MODE 2: 側邊滾動對照清單 (Scrollable Sidebar) ================= -->
+    <template v-if="displayMode === 'sidebar'">
+      <!-- Screen Text Location Markers / Highlights on the left -->
+      <div
+        v-for="block in blocks"
+        :key="'marker-' + block.id"
+        class="screen-marker"
+        :class="{
+          active: activeSidebarBlockId === block.id || hoveredBlock?.id === block.id,
+        }"
+        :style="{
+          left: `${block.rect.x}px`,
+          top: `${block.rect.y}px`,
+          width: `${Math.max(block.rect.width, 24)}px`,
+          height: `${Math.max(block.rect.height, 18)}px`,
+        }"
+        @mouseenter="hoveredBlock = block"
+        @mouseleave="hoveredBlock = null"
+        @click="scrollToSidebarItem(block.id)"
+        :title="`#${block.id + 1} 點選在側邊清單中定位`"
+      >
+        <span class="marker-badge">#{{ block.id + 1 }}</span>
+      </div>
+
+      <!-- Right Scrollable Drawer / Side Panel -->
+      <aside class="sidebar-drawer">
+        <div class="sidebar-header">
+          <div class="sidebar-title-row">
+            <div class="sidebar-title">
+              <span class="sidebar-icon">📜</span>
+              <span>閱讀對照清單</span>
+              <span class="item-count-badge">{{ filteredBlocks.length }}</span>
+            </div>
+            <button class="icon-btn" @click="copyAllTranslatedText($event)" title="複製全部譯文">
+              📋 複製全部
+            </button>
+          </div>
+
+          <!-- Search Input -->
+          <div class="sidebar-search">
+            <input
+              v-model="searchQuery"
+              type="text"
+              placeholder="搜尋原文或譯文內容..."
+              class="search-input"
+            />
+            <button v-if="searchQuery" class="clear-search" @click="searchQuery = ''">✕</button>
+          </div>
+        </div>
+
+        <!-- Scrollable Cards Container (Supports Mouse Wheel / Trackpad Scrolling) -->
+        <div ref="sidebarListRef" class="sidebar-list">
+          <div
+            v-for="(block, idx) in filteredBlocks"
+            :id="`sidebar-item-${block.id}`"
+            :key="block.id"
+            class="sidebar-card"
+            :class="{
+              selected: activeSidebarBlockId === block.id || hoveredBlock?.id === block.id,
+            }"
+            @mouseenter="hoveredBlock = block"
+            @mouseleave="hoveredBlock = null"
+          >
+            <div class="card-top">
+              <span class="card-index">#{{ idx + 1 }}</span>
+              <button
+                class="copy-btn"
+                :class="{ copied: copiedId === block.id }"
+                @click="copyText(block.translated_text, $event, block.id)"
+                title="複製此段譯文"
+              >
+                {{ copiedId === block.id ? "✓ 已複製" : "複製譯文" }}
+              </button>
+            </div>
+
+            <!-- Translated Text (Primary) -->
+            <div class="card-translation">
+              {{ block.translated_text }}
+            </div>
+
+            <!-- Original Text (Reference) -->
+            <div class="card-original">
+              <span class="original-tag">原文</span>
+              <span class="original-text">{{ block.original_text }}</span>
+            </div>
+          </div>
+
+          <div v-if="filteredBlocks.length === 0" class="empty-state">
+            沒有符合「{{ searchQuery }}」的內容
+          </div>
+        </div>
+
+        <div class="sidebar-footer">
+          <span>支援滑鼠滾輪上下滾動</span>
+          <span>按 <kbd>Tab</kbd> 切換回原地覆蓋模式</span>
+        </div>
+      </aside>
+    </template>
 
     <!-- Copy Toast Notification -->
     <div
@@ -174,13 +354,14 @@ onUnmounted(() => {
   inset: 0;
   width: 100vw;
   height: 100vh;
-  background-color: rgba(15, 23, 42, 0.05);
+  background-color: rgba(15, 23, 42, 0.06);
   user-select: none;
   cursor: default;
   overflow: hidden;
   z-index: 99999;
 }
 
+/* ================= Top Pill Toolbar ================= */
 .floating-toolbar {
   position: fixed;
   top: 18px;
@@ -188,12 +369,12 @@ onUnmounted(() => {
   transform: translateX(-50%);
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 14px;
   background: rgba(30, 41, 59, 0.94);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
   color: #f8fafc;
-  padding: 8px 18px;
+  padding: 6px 16px;
   border-radius: 9999px;
   box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.35), 0 8px 10px -6px rgba(0, 0, 0, 0.2);
   border: 1px solid rgba(255, 255, 255, 0.15);
@@ -230,11 +411,49 @@ onUnmounted(() => {
   box-shadow: 0 0 8px #38bdf8;
 }
 
+.mode-switcher {
+  display: flex;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 9999px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.mode-btn {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.mode-btn:hover {
+  color: #f8fafc;
+}
+
+.mode-btn.active {
+  background: #0284c7;
+  color: #ffffff;
+  font-weight: 600;
+  box-shadow: 0 2px 6px rgba(2, 132, 199, 0.4);
+}
+
 .toolbar-info {
   font-size: 12px;
   color: #94a3b8;
   border-left: 1px solid rgba(255, 255, 255, 0.15);
-  padding-left: 14px;
+  padding-left: 12px;
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .tool-btn {
@@ -248,11 +467,23 @@ onUnmounted(() => {
   transition: all 0.15s ease;
 }
 
-.tool-btn:hover {
+.tool-btn.copy-all {
+  background: rgba(56, 189, 248, 0.2);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.4);
+}
+
+.tool-btn.copy-all:hover {
+  background: #0284c7;
+  color: white;
+}
+
+.tool-btn.close-btn:hover {
   background: rgba(239, 68, 68, 0.85);
   color: white;
 }
 
+/* ================= MODE 1: 原地文字塊 ================= */
 .pixel-block {
   position: absolute;
   display: flex;
@@ -284,7 +515,7 @@ onUnmounted(() => {
 .pixel-tooltip {
   position: absolute;
   left: 0;
-  background: rgba(15, 23, 42, 0.95);
+  background: rgba(15, 23, 42, 0.96);
   color: #f8fafc;
   padding: 8px 12px;
   border-radius: 6px;
@@ -292,8 +523,8 @@ onUnmounted(() => {
   pointer-events: none;
   font-size: 12px;
   line-height: 1.4;
-  min-width: 160px;
-  max-width: 320px;
+  min-width: 180px;
+  max-width: 340px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   z-index: 9999;
   backdrop-filter: blur(8px);
@@ -320,13 +551,305 @@ onUnmounted(() => {
   text-align: right;
 }
 
+/* ================= MODE 2: 螢幕定位標記 ================= */
+.screen-marker {
+  position: absolute;
+  border: 1.5px dashed rgba(56, 189, 248, 0.4);
+  background: rgba(56, 189, 248, 0.06);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  z-index: 50;
+}
+
+.screen-marker:hover,
+.screen-marker.active {
+  border: 2px solid #38bdf8;
+  background: rgba(56, 189, 248, 0.2);
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.4);
+  z-index: 100;
+}
+
+.marker-badge {
+  position: absolute;
+  top: -10px;
+  left: 0;
+  background: #0284c7;
+  color: white;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+/* ================= MODE 2: 側邊滾動對照面板 (Scrollable Sidebar) ================= */
+.sidebar-drawer {
+  position: fixed;
+  right: 0;
+  top: 0;
+  width: 440px;
+  height: 100vh;
+  background: rgba(15, 23, 42, 0.94);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  flex-direction: column;
+  box-shadow: -10px 0 30px rgba(0, 0, 0, 0.4);
+  z-index: 99990;
+  animation: slideInRight 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes slideInRight {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.sidebar-header {
+  padding: 18px 20px 12px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: rgba(30, 41, 59, 0.4);
+}
+
+.sidebar-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.sidebar-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #f1f5f9;
+}
+
+.sidebar-icon {
+  font-size: 18px;
+}
+
+.item-count-badge {
+  font-size: 11px;
+  background: rgba(56, 189, 248, 0.2);
+  color: #38bdf8;
+  padding: 2px 7px;
+  border-radius: 9999px;
+  font-weight: 600;
+}
+
+.icon-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #38bdf8;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.icon-btn:hover {
+  background: #0284c7;
+  color: white;
+}
+
+.sidebar-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.search-input {
+  width: 100%;
+  padding: 8px 30px 8px 12px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #f8fafc;
+  border-radius: 8px;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.search-input:focus {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+}
+
+.clear-search {
+  position: absolute;
+  right: 8px;
+  background: none;
+  border: none;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+/* ================= 滾輪捲軸容器 (Scrollable Body) ================= */
+.sidebar-list {
+  flex: 1;
+  padding: 14px 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+
+.sidebar-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sidebar-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sidebar-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 9999px;
+}
+
+.sidebar-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.35);
+}
+
+.sidebar-card {
+  background: rgba(30, 41, 59, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: all 0.15s ease;
+  cursor: default;
+}
+
+.sidebar-card:hover {
+  background: rgba(30, 41, 59, 0.9);
+  border-color: rgba(56, 189, 248, 0.3);
+  transform: translateY(-1px);
+}
+
+.sidebar-card.selected {
+  border-color: #38bdf8;
+  background: rgba(14, 165, 233, 0.12);
+  box-shadow: 0 0 12px rgba(14, 165, 233, 0.25);
+}
+
+.card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.card-index {
+  font-size: 11px;
+  font-weight: 700;
+  color: #38bdf8;
+}
+
+.copy-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: none;
+  color: #94a3b8;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.copy-btn:hover {
+  background: rgba(56, 189, 248, 0.2);
+  color: #38bdf8;
+}
+
+.copy-btn.copied {
+  color: #34d399;
+  background: rgba(16, 185, 129, 0.15);
+}
+
+.card-translation {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: #f8fafc;
+  user-select: text;
+}
+
+.card-original {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #94a3b8;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  padding-top: 6px;
+  user-select: text;
+}
+
+.original-tag {
+  font-size: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+  padding: 1px 4px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.original-text {
+  word-break: break-all;
+}
+
+.empty-state {
+  text-align: center;
+  color: #64748b;
+  font-size: 13px;
+  margin-top: 40px;
+}
+
+.sidebar-footer {
+  padding: 10px 18px;
+  background: rgba(15, 23, 42, 0.95);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #64748b;
+}
+
+kbd {
+  background: #334155;
+  color: #f1f5f9;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-family: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* ================= 複製提示 Toast ================= */
 .copy-toast {
   position: fixed;
   background: #10b981;
   color: white;
-  padding: 4px 10px;
+  padding: 5px 12px;
   border-radius: 9999px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   pointer-events: none;
   box-shadow: 0 4px 12px rgba(16, 185, 129, 0.4);

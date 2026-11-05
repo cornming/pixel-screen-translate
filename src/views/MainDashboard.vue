@@ -3,6 +3,7 @@ import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
 const targetLang = ref("zh-TW");
+const defaultMode = ref("inplace");
 const isTranslating = ref(false);
 const statusMessage = ref("");
 const detectedCount = ref<number | null>(null);
@@ -23,6 +24,12 @@ async function syncTargetLanguage() {
   } catch (err) {
     console.warn("Failed to set target language:", err);
   }
+}
+
+function onModeChange() {
+  try {
+    localStorage.setItem("pixel_translate_mode", defaultMode.value);
+  } catch (_) {}
 }
 
 async function startScreenTranslation() {
@@ -55,6 +62,12 @@ async function showOverlayDirectly() {
 
 onMounted(() => {
   syncTargetLanguage();
+  try {
+    const saved = localStorage.getItem("pixel_translate_mode");
+    if (saved === "inplace" || saved === "sidebar") {
+      defaultMode.value = saved;
+    }
+  } catch (_) {}
 });
 </script>
 
@@ -72,7 +85,7 @@ onMounted(() => {
         </div>
         <div>
           <h1 class="logo-title">Pixel 螢幕即時翻譯</h1>
-          <p class="logo-sub">Google Pixel 風格 · 原地覆蓋排版 · 全域快捷鍵 Ctrl+Alt+T</p>
+          <p class="logo-sub">原地覆蓋排版 · 側邊滾動對照 · 全域快捷鍵 Ctrl+Alt+T</p>
         </div>
       </div>
       <div class="badge-online">離線 OCR 運作中</div>
@@ -80,18 +93,33 @@ onMounted(() => {
 
     <!-- Main Content -->
     <main class="dashboard-main">
-      <!-- Target Language Card -->
-      <section class="card config-card">
-        <label class="section-label">目標翻譯語言</label>
-        <div class="select-wrapper">
-          <select v-model="targetLang" class="lang-select" @change="syncTargetLanguage">
-            <option v-for="lang in languageOptions" :key="lang.code" :value="lang.code">
-              {{ lang.label }}
-            </option>
-          </select>
-        </div>
-        <p class="hint-text">自動偵測來源語言，並將其原地翻譯為所選語言。</p>
-      </section>
+      <!-- Configuration Cards Grid -->
+      <div class="grid-2col">
+        <!-- Target Language Card -->
+        <section class="card config-card">
+          <label class="section-label">目標翻譯語言</label>
+          <div class="select-wrapper">
+            <select v-model="targetLang" class="lang-select" @change="syncTargetLanguage">
+              <option v-for="lang in languageOptions" :key="lang.code" :value="lang.code">
+                {{ lang.label }}
+              </option>
+            </select>
+          </div>
+          <p class="hint-text">自動偵測來源語言，並將其翻譯為所選語言。</p>
+        </section>
+
+        <!-- Default Presentation Mode Card -->
+        <section class="card config-card">
+          <label class="section-label">預設呈現模式</label>
+          <div class="select-wrapper">
+            <select v-model="defaultMode" class="lang-select" @change="onModeChange">
+              <option value="inplace">📌 原地覆蓋（Pixel 貼平遮罩）</option>
+              <option value="sidebar">📜 側邊滾動對照（滑鼠滾輪瀏覽）</option>
+            </select>
+          </div>
+          <p class="hint-text">覆蓋層中按 <kbd>Tab</kbd> 可隨時在兩種模式間切換。</p>
+        </section>
+      </div>
 
       <!-- Action Button Area -->
       <section class="action-area">
@@ -102,12 +130,12 @@ onMounted(() => {
         >
           <span v-if="!isTranslating" class="btn-icon">⚡</span>
           <span v-else class="spinner"></span>
-          <span>{{ isTranslating ? "正在辨識與翻譯螢幕..." : "立即進行全螢幕原地翻譯" }}</span>
+          <span>{{ isTranslating ? "正在辨識與翻譯螢幕..." : "立即進行全螢幕翻譯" }}</span>
         </button>
 
         <div v-if="detectedCount !== null" class="secondary-actions">
           <button class="secondary-btn" @click="showOverlayDirectly">
-            🔍 開啟/檢視翻譯覆蓋層
+            🔍 開啟 / 檢視目前翻譯覆蓋層
           </button>
         </div>
 
@@ -127,10 +155,10 @@ onMounted(() => {
         </div>
 
         <div class="status-card">
-          <div class="card-icon green">🎨</div>
+          <div class="card-icon green">📜</div>
           <div class="card-info">
-            <div class="card-title">智慧邊緣色彩採樣</div>
-            <div class="card-desc">自動提取背景色平鋪覆蓋，自適應高對比文字</div>
+            <div class="card-title">側邊滾動對照</div>
+            <div class="card-desc">支援滑鼠滾輪上下滾動，長篇閱讀最直覺</div>
           </div>
         </div>
 
@@ -143,10 +171,10 @@ onMounted(() => {
         </div>
 
         <div class="status-card">
-          <div class="card-icon amber">❌</div>
+          <div class="card-icon amber">🔄</div>
           <div class="card-info">
-            <div class="card-title">覆蓋層關閉</div>
-            <div class="card-desc">全螢幕覆蓋狀態下按 <kbd>Esc</kbd> 或點擊空白處關閉</div>
+            <div class="card-title">雙模式切換</div>
+            <div class="card-desc">覆蓋層中按 <kbd>Tab</kbd> 切換，按 <kbd>Esc</kbd> 退出</div>
           </div>
         </div>
       </section>
@@ -154,7 +182,7 @@ onMounted(() => {
 
     <!-- Footer -->
     <footer class="dashboard-footer">
-      <span>Pixel Screen Translate · v0.1.0</span>
+      <span>Pixel Screen Translate · v0.2.0</span>
       <span>隨時按下 Ctrl+Alt+T 即可直接翻譯當前螢幕</span>
     </footer>
   </div>
@@ -232,11 +260,17 @@ onMounted(() => {
   overflow-y: auto;
 }
 
+.grid-2col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
 .card {
   background: rgba(30, 41, 59, 0.6);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 12px;
-  padding: 14px 18px;
+  padding: 14px 16px;
 }
 
 .section-label {
