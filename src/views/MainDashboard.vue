@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 const targetLang = ref("zh-TW");
 const defaultMode = ref("inplace");
 const isTranslating = ref(false);
+const isLiveScrollActive = ref(false);
 const statusMessage = ref("");
 const detectedCount = ref<number | null>(null);
 
@@ -52,6 +53,22 @@ async function startScreenTranslation() {
   }
 }
 
+async function toggleLiveScroll() {
+  try {
+    await syncTargetLanguage();
+    const nextState = !isLiveScrollActive.value;
+    await invoke("set_live_scroll_mode", { enabled: nextState });
+    isLiveScrollActive.value = nextState;
+    if (nextState) {
+      statusMessage.value = "已啟用滾輪即時跟隨模式！請直接在瀏覽器或文件上滾動滑鼠滾輪，畫面將即時動態翻譯。";
+    } else {
+      statusMessage.value = "已關閉滾輪即時跟隨模式。";
+    }
+  } catch (err: any) {
+    statusMessage.value = `發生錯誤: ${err}`;
+  }
+}
+
 async function showOverlayDirectly() {
   try {
     await invoke("show_overlay");
@@ -60,13 +77,14 @@ async function showOverlayDirectly() {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   syncTargetLanguage();
   try {
     const saved = localStorage.getItem("pixel_translate_mode");
     if (saved === "inplace" || saved === "sidebar") {
       defaultMode.value = saved;
     }
+    isLiveScrollActive.value = await invoke("is_live_scroll_active");
   } catch (_) {}
 });
 </script>
@@ -85,7 +103,7 @@ onMounted(() => {
         </div>
         <div>
           <h1 class="logo-title">Pixel 螢幕即時翻譯</h1>
-          <p class="logo-sub">原地覆蓋排版 · 側邊滾動對照 · 全域快捷鍵 Ctrl+Alt+T</p>
+          <p class="logo-sub">原地覆蓋 · 滾輪動態跟隨翻譯 · 全域快捷鍵</p>
         </div>
       </div>
       <div class="badge-online">離線 OCR 運作中</div>
@@ -114,7 +132,7 @@ onMounted(() => {
           <div class="select-wrapper">
             <select v-model="defaultMode" class="lang-select" @change="onModeChange">
               <option value="inplace">📌 原地覆蓋（Pixel 貼平遮罩）</option>
-              <option value="sidebar">📜 側邊滾動對照（滑鼠滾輪瀏覽）</option>
+              <option value="sidebar">📜 側邊滾動對照（條列閱讀與滾輪）</option>
             </select>
           </div>
           <p class="hint-text">覆蓋層中按 <kbd>Tab</kbd> 可隨時在兩種模式間切換。</p>
@@ -123,14 +141,30 @@ onMounted(() => {
 
       <!-- Action Button Area -->
       <section class="action-area">
+        <!-- Button 1: Live Wheel Follow Mode -->
+        <button
+          class="live-scroll-btn"
+          :class="{ active: isLiveScrollActive }"
+          @click="toggleLiveScroll"
+        >
+          <span class="live-btn-icon">🖱️</span>
+          <div class="btn-text-col">
+            <span class="btn-main-title">
+              {{ isLiveScrollActive ? "🟢 滾輪即時跟隨翻譯中 (點擊停用)" : "⚡ 啟動「滾輪即時跟隨翻譯」模式" }}
+            </span>
+            <span class="btn-sub-title">自由滾動底層網頁/PDF，畫面滾動停頓時自動即時辨識與原地覆蓋（Ctrl+Alt+W）</span>
+          </div>
+        </button>
+
+        <!-- Button 2: Snapshot Fullscreen Translate -->
         <button
           class="primary-btn"
           :disabled="isTranslating"
           @click="startScreenTranslation"
         >
-          <span v-if="!isTranslating" class="btn-icon">⚡</span>
+          <span v-if="!isTranslating" class="btn-icon">📸</span>
           <span v-else class="spinner"></span>
-          <span>{{ isTranslating ? "正在辨識與翻譯螢幕..." : "立即進行全螢幕翻譯" }}</span>
+          <span>{{ isTranslating ? "正在辨識與翻譯螢幕..." : "定格全螢幕快照翻譯 (Ctrl+Alt+T)" }}</span>
         </button>
 
         <div v-if="detectedCount !== null" class="secondary-actions">
@@ -147,34 +181,34 @@ onMounted(() => {
       <!-- Architecture & Status Badges -->
       <section class="grid-cards">
         <div class="status-card">
-          <div class="card-icon blue">🔍</div>
+          <div class="card-icon green">🖱️</div>
           <div class="card-info">
-            <div class="card-title">Windows 原生 OCR</div>
-            <div class="card-desc">Windows.Media.Ocr 離線辨識，毫秒級座標擷取</div>
+            <div class="card-title">滾輪動態追蹤</div>
+            <div class="card-desc">按 <kbd>Ctrl + Alt + W</kbd> 邊滾動邊自動即時翻譯</div>
           </div>
         </div>
 
         <div class="status-card">
-          <div class="card-icon green">📜</div>
+          <div class="card-icon blue">📸</div>
           <div class="card-info">
-            <div class="card-title">側邊滾動對照</div>
-            <div class="card-desc">支援滑鼠滾輪上下滾動，長篇閱讀最直覺</div>
+            <div class="card-title">全螢幕定格快照</div>
+            <div class="card-desc">按 <kbd>Ctrl + Alt + T</kbd> 定格畫面原地替換</div>
           </div>
         </div>
 
         <div class="status-card">
-          <div class="card-icon purple">⌨️</div>
-          <div class="card-info">
-            <div class="card-title">全域快捷鍵</div>
-            <div class="card-desc">隨時在任何畫面按下 <kbd>Ctrl + Alt + T</kbd> 即時翻譯</div>
-          </div>
-        </div>
-
-        <div class="status-card">
-          <div class="card-icon amber">🔄</div>
+          <div class="card-icon purple">🔄</div>
           <div class="card-info">
             <div class="card-title">雙模式切換</div>
-            <div class="card-desc">覆蓋層中按 <kbd>Tab</kbd> 切換，按 <kbd>Esc</kbd> 退出</div>
+            <div class="card-desc">覆蓋層中按 <kbd>Tab</kbd> 切換原地或側邊清單</div>
+          </div>
+        </div>
+
+        <div class="status-card">
+          <div class="card-icon amber">❌</div>
+          <div class="card-info">
+            <div class="card-title">退出覆蓋層</div>
+            <div class="card-desc">隨時按 <kbd>Esc</kbd> 退出所有覆蓋狀態</div>
           </div>
         </div>
       </section>
@@ -182,8 +216,8 @@ onMounted(() => {
 
     <!-- Footer -->
     <footer class="dashboard-footer">
-      <span>Pixel Screen Translate · v0.2.0</span>
-      <span>隨時按下 Ctrl+Alt+T 即可直接翻譯當前螢幕</span>
+      <span>Pixel Screen Translate · v0.3.0</span>
+      <span>滾動追蹤：Ctrl+Alt+W · 快照翻譯：Ctrl+Alt+T</span>
     </footer>
   </div>
 </template>
@@ -314,28 +348,74 @@ onMounted(() => {
   gap: 10px;
 }
 
-.primary-btn {
+.live-scroll-btn {
   width: 100%;
   padding: 12px 18px;
-  background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%);
+  background: linear-gradient(135deg, #059669 0%, #10b981 100%);
   color: white;
   border: none;
   border-radius: 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: 0 4px 14px rgba(16, 185, 129, 0.35);
+  transition: all 0.2s ease;
+  text-align: left;
+}
+
+.live-scroll-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(16, 185, 129, 0.45);
+  filter: brightness(1.08);
+}
+
+.live-scroll-btn.active {
+  background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%);
+  box-shadow: 0 4px 14px rgba(239, 68, 68, 0.35);
+}
+
+.live-btn-icon {
+  font-size: 24px;
+}
+
+.btn-text-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.btn-main-title {
   font-size: 14px;
+  font-weight: 700;
+}
+
+.btn-sub-title {
+  font-size: 11px;
+  opacity: 0.9;
+}
+
+.primary-btn {
+  width: 100%;
+  padding: 10px 18px;
+  background: rgba(30, 41, 59, 0.8);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  color: #38bdf8;
+  border-radius: 10px;
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
   transition: all 0.2s ease;
 }
 
 .primary-btn:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 18px rgba(37, 99, 235, 0.45);
-  filter: brightness(1.08);
+  background: rgba(14, 165, 233, 0.15);
+  border-color: #38bdf8;
+  color: white;
 }
 
 .primary-btn:disabled {

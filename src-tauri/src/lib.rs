@@ -1,15 +1,18 @@
 pub mod capture;
 pub mod color;
+pub mod mouse_hook;
 pub mod ocr;
 pub mod translate;
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use crate::capture::capture_primary_monitor;
 use crate::color::sample_colors;
+use crate::mouse_hook::MouseWheelMonitor;
 use crate::ocr::{recognize_image_bytes, BoundingBox};
 use crate::translate::Translator;
 
@@ -35,6 +38,8 @@ pub struct AppState {
     pub translator: Arc<Translator>,
     pub latest_translation: Arc<Mutex<Option<ScreenTranslationResponse>>>,
     pub target_lang: Arc<Mutex<String>>,
+    pub mouse_monitor: Arc<MouseWheelMonitor>,
+    pub is_live_scroll_enabled: Arc<AtomicBool>,
 }
 
 pub async fn do_translate_screen(
@@ -122,20 +127,66 @@ async fn trigger_screen_translation(
 
     let result = do_translate_screen(&state.translator, &lang).await?;
 
-    // Store latest result so overlay can fetch it anytime
     {
         let mut store = state.latest_translation.lock().unwrap();
         *store = Some(result.clone());
     }
 
-    // Show and notify overlay window
     if let Some(overlay) = app_handle.get_webview_window("overlay") {
+        let _ = overlay.set_ignore_cursor_events(false);
         let _ = overlay.show();
         let _ = overlay.set_focus();
         let _ = overlay.emit("screen-translated-data", &result);
     }
 
     Ok(result)
+}
+
+#[tauri::command]
+fn set_live_scroll_mode(
+    enabled: bool,
+    app_handle: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<bool, String> {
+    state.is_live_scroll_enabled.store(enabled, Ordering::SeqCst);
+    state.mouse_monitor.set_active(enabled);
+
+    if let Some(overlay) = app_handle.get_webview_window("overlay") {
+        if enabled {
+            // In live scroll mode, allow mouse wheel and clicks to pass through to the underlying app
+            let _ = overlay.set_ignore_cursor_events(true);
+            let _ = overlay.show();
+            let _ = overlay.emit("live-scroll-status", true);
+
+            // Trigger an immediate translation on enable
+            let translator = state.translator.clone();
+            let target_lang = state.target_lang.lock().unwrap().clone();
+            let latest_store = state.latest_translation.clone();
+            let overlay_clone = overlay.clone();
+
+            tauri::async_runtime::spawn(async move {
+                if let Ok(result) = do_translate_screen(&translator, &target_lang).await {
+                    {
+                        let mut store = latest_store.lock().unwrap();
+                        *store = Some(result.clone());
+                    }
+                    let _ = overlay_clone.emit("screen-translated-data", &result);
+                }
+            });
+        } else {
+            let _ = overlay.set_ignore_cursor_events(false);
+            let _ = overlay.emit("live-scroll-status", false);
+        }
+    }
+
+    Ok(enabled)
+}
+
+#[tauri::command]
+fn is_live_scroll_active(
+    state: tauri::State<'_, AppState>,
+) -> bool {
+    state.is_live_scroll_enabled.load(Ordering::SeqCst)
 }
 
 #[tauri::command]
@@ -164,8 +215,15 @@ fn show_overlay(app_handle: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn hide_overlay(app_handle: AppHandle) -> Result<(), String> {
+fn hide_overlay(
+    app_handle: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    state.is_live_scroll_enabled.store(false, Ordering::SeqCst);
+    state.mouse_monitor.set_active(false);
+
     if let Some(overlay) = app_handle.get_webview_window("overlay") {
+        let _ = overlay.set_ignore_cursor_events(false);
         overlay.hide().map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -176,40 +234,121 @@ pub fn run() {
     let translator = Arc::new(Translator::new());
     let latest_translation = Arc::new(Mutex::new(None));
     let target_lang = Arc::new(Mutex::new("zh-TW".to_string()));
+    let is_live_scroll_enabled = Arc::new(AtomicBool::new(false));
+
+    // Create Mouse Wheel Monitor with debounced callback
+    let translator_for_hook = translator.clone();
+    let target_lang_for_hook = target_lang.clone();
+    let latest_for_hook = latest_translation.clone();
+
+    // AppHandle holder for hook callback
+    let app_handle_holder: Arc<Mutex<Option<AppHandle>>> = Arc::new(Mutex::new(None));
+    let holder_clone = app_handle_holder.clone();
+
+    let mouse_monitor = Arc::new(MouseWheelMonitor::new(move || {
+        let translator = translator_for_hook.clone();
+        let lang = target_lang_for_hook.lock().unwrap().clone();
+        let latest_store = latest_for_hook.clone();
+
+        if let Some(ref app) = *holder_clone.lock().unwrap() {
+            let app_clone = app.clone();
+            // First emit scrolling start so UI can fade out obsolete blocks
+            if let Some(overlay) = app_clone.get_webview_window("overlay") {
+                let _ = overlay.emit("screen-is-scrolling", ());
+            }
+
+            tauri::async_runtime::spawn(async move {
+                if let Ok(result) = do_translate_screen(&translator, &lang).await {
+                    {
+                        let mut store = latest_store.lock().unwrap();
+                        *store = Some(result.clone());
+                    }
+                    if let Some(overlay) = app_clone.get_webview_window("overlay") {
+                        let _ = overlay.emit("screen-translated-data", &result);
+                    }
+                }
+            });
+        }
+    }));
+
+    let mouse_monitor_clone = mouse_monitor.clone();
+    let is_live_scroll_clone = is_live_scroll_enabled.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
+                .with_handler(|app, shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
                         let state = app.state::<AppState>();
                         let app_handle = app.clone();
                         let translator = state.translator.clone();
                         let latest_store = state.latest_translation.clone();
                         let target_lang = state.target_lang.lock().unwrap().clone();
+                        let shortcut_str = shortcut.to_string().to_lowercase();
 
-                        tauri::async_runtime::spawn(async move {
-                            if let Ok(result) = do_translate_screen(&translator, &target_lang).await {
-                                {
-                                    let mut store = latest_store.lock().unwrap();
-                                    *store = Some(result.clone());
-                                }
-                                if let Some(overlay) = app_handle.get_webview_window("overlay") {
-                                    let _ = overlay.show();
-                                    let _ = overlay.set_focus();
-                                    let _ = overlay.emit("screen-translated-data", &result);
-                                }
+                        if shortcut_str.contains("w") {
+                            // Toggle Live Scroll Follow Mode
+                            let is_active = state.is_live_scroll_enabled.load(Ordering::SeqCst);
+                            let new_state = !is_active;
+                            state.is_live_scroll_enabled.store(new_state, Ordering::SeqCst);
+                            state.mouse_monitor.set_active(new_state);
+
+                            if let Some(overlay) = app_handle.get_webview_window("overlay") {
+                                let _ = overlay.set_ignore_cursor_events(new_state);
+                                let _ = overlay.show();
+                                let _ = overlay.emit("live-scroll-status", new_state);
                             }
-                        });
+
+                            if new_state {
+                                // Trigger immediate scan
+                                tauri::async_runtime::spawn(async move {
+                                    if let Ok(result) = do_translate_screen(&translator, &target_lang).await {
+                                        {
+                                            let mut store = latest_store.lock().unwrap();
+                                            *store = Some(result.clone());
+                                        }
+                                        if let Some(overlay) = app_handle.get_webview_window("overlay") {
+                                            let _ = overlay.emit("screen-translated-data", &result);
+                                        }
+                                    }
+                                });
+                            }
+                        } else {
+                            // Standard Snapshot Translate (Ctrl+Alt+T)
+                            state.is_live_scroll_enabled.store(false, Ordering::SeqCst);
+                            state.mouse_monitor.set_active(false);
+
+                            tauri::async_runtime::spawn(async move {
+                                if let Ok(result) = do_translate_screen(&translator, &target_lang).await {
+                                    {
+                                        let mut store = latest_store.lock().unwrap();
+                                        *store = Some(result.clone());
+                                    }
+                                    if let Some(overlay) = app_handle.get_webview_window("overlay") {
+                                        let _ = overlay.set_ignore_cursor_events(false);
+                                        let _ = overlay.show();
+                                        let _ = overlay.set_focus();
+                                        let _ = overlay.emit("screen-translated-data", &result);
+                                        let _ = overlay.emit("live-scroll-status", false);
+                                    }
+                                }
+                            });
+                        }
                     }
                 })
                 .build(),
         )
-        .setup(|app| {
+        .setup(move |app| {
+            *app_handle_holder.lock().unwrap() = Some(app.handle().clone());
+
             // Register global shortcut Ctrl+Alt+T
             if let Err(e) = app.global_shortcut().register("Ctrl+Alt+T") {
                 eprintln!("Failed to register Ctrl+Alt+T: {}", e);
+            }
+            // Register global shortcut Ctrl+Alt+W (Live Wheel Follow mode)
+            if let Err(e) = app.global_shortcut().register("Ctrl+Alt+W") {
+                eprintln!("Failed to register Ctrl+Alt+W: {}", e);
             }
             Ok(())
         })
@@ -217,10 +356,14 @@ pub fn run() {
             translator,
             latest_translation,
             target_lang,
+            mouse_monitor: mouse_monitor_clone,
+            is_live_scroll_enabled: is_live_scroll_clone,
         })
         .invoke_handler(tauri::generate_handler![
             translate_screen,
             trigger_screen_translation,
+            set_live_scroll_mode,
+            is_live_scroll_active,
             get_latest_translation,
             set_target_language,
             show_overlay,

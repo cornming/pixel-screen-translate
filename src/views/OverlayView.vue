@@ -28,13 +28,17 @@ interface ScreenTranslationResponse {
 
 const blocks = ref<TranslatedBlock[]>([]);
 const displayMode = ref<"inplace" | "sidebar">("inplace");
+const isLiveScroll = ref(false);
+const isScrollingNow = ref(false);
 const searchQuery = ref("");
 const hoveredBlock = ref<TranslatedBlock | null>(null);
 const activeSidebarBlockId = ref<number | null>(null);
 const copiedId = ref<number | null>(null);
 const copyToast = ref<{ text: string; x: number; y: number } | null>(null);
 
-let unlistenFn: (() => void) | null = null;
+let unlistenTranslateFn: (() => void) | null = null;
+let unlistenScrollFn: (() => void) | null = null;
+let unlistenStatusFn: (() => void) | null = null;
 
 const filteredBlocks = computed(() => {
   if (!searchQuery.value.trim()) return blocks.value;
@@ -51,6 +55,16 @@ async function closeOverlay() {
     await invoke("hide_overlay");
   } catch (err) {
     console.error("Failed to hide overlay:", err);
+  }
+}
+
+async function toggleLiveScrollMode() {
+  try {
+    const nextState = !isLiveScroll.value;
+    await invoke("set_live_scroll_mode", { enabled: nextState });
+    isLiveScroll.value = nextState;
+  } catch (err) {
+    console.error("Failed to toggle live scroll mode:", err);
   }
 }
 
@@ -131,36 +145,57 @@ onMounted(async () => {
     if (latest && latest.blocks && latest.blocks.length > 0) {
       blocks.value = latest.blocks;
     }
+    isLiveScroll.value = await invoke("is_live_scroll_active");
   } catch (err) {
     console.warn("Could not fetch latest translation:", err);
   }
 
   // 2. Listen to translation events for live updates
   try {
-    unlistenFn = await listen<ScreenTranslationResponse>("screen-translated-data", (event) => {
+    unlistenTranslateFn = await listen<ScreenTranslationResponse>("screen-translated-data", (event) => {
       blocks.value = event.payload.blocks;
+      isScrollingNow.value = false;
+    });
+
+    unlistenScrollFn = await listen("screen-is-scrolling", () => {
+      isScrollingNow.value = true;
+    });
+
+    unlistenStatusFn = await listen<boolean>("live-scroll-status", (event) => {
+      isLiveScroll.value = event.payload;
     });
   } catch (err) {
-    console.error("Failed to listen to screen-translated-data:", err);
+    console.error("Failed to listen to tauri events:", err);
   }
 });
 
 onUnmounted(() => {
   window.removeEventListener("keydown", handleKeyDown);
-  if (unlistenFn) {
-    unlistenFn();
-  }
+  if (unlistenTranslateFn) unlistenTranslateFn();
+  if (unlistenScrollFn) unlistenScrollFn();
+  if (unlistenStatusFn) unlistenStatusFn();
 });
 </script>
 
 <template>
-  <div class="overlay-container" @click.self="closeOverlay">
+  <div class="overlay-container" :class="{ 'live-mode': isLiveScroll }" @click.self="closeOverlay">
     <!-- Top Floating Pixel-style Pill Toolbar -->
-    <div class="floating-toolbar">
+    <div class="floating-toolbar" :class="{ 'live-glow': isLiveScroll }">
       <div class="toolbar-brand">
-        <span class="pulse-dot"></span>
-        <span class="brand-text">Pixel 螢幕翻譯</span>
+        <span class="pulse-dot" :class="{ live: isLiveScroll }"></span>
+        <span class="brand-text">{{ isLiveScroll ? "滾輪動態翻譯中" : "Pixel 螢幕翻譯" }}</span>
       </div>
+
+      <!-- Live Wheel Scroll Mode Toggle -->
+      <button
+        class="live-toggle-btn"
+        :class="{ active: isLiveScroll }"
+        @click="toggleLiveScrollMode"
+        title="按 Ctrl+Alt+W 開啟/關閉滾輪即時跟隨"
+      >
+        <span class="wheel-icon">🖱️</span>
+        <span>{{ isLiveScroll ? "動態滾輪追蹤：開" : "動態滾輪追蹤：關" }}</span>
+      </button>
 
       <!-- Mode Switcher -->
       <div class="mode-switcher">
@@ -178,12 +213,13 @@ onUnmounted(() => {
           @click="displayMode = 'sidebar'"
           title="側邊滾動對照清單 (按 Tab 切換)"
         >
-          📜 側邊滾動對照
+          📜 側邊清單
         </button>
       </div>
 
       <div class="toolbar-info">
-        <span>共 {{ blocks.length }} 個文字區塊</span>
+        <span v-if="isScrollingNow" class="scrolling-hint">⚡ 偵測滾動中...</span>
+        <span v-else>共 {{ blocks.length }} 處文字</span>
       </div>
 
       <div class="toolbar-actions">
@@ -201,12 +237,18 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <!-- Live Scroll Tip Floating Pill (when live scroll mode is active) -->
+    <div v-if="isLiveScroll" class="live-status-pill">
+      <span>🟢 滾輪穿透已啟用：滾動滑鼠滾輪，畫面內容將自動即時更新翻譯（按 <kbd>Ctrl+Alt+W</kbd> 退出）</span>
+    </div>
+
     <!-- ================= MODE 1: 原地替換覆蓋 (In-Place Replacement) ================= -->
     <template v-if="displayMode === 'inplace'">
       <div
         v-for="block in blocks"
         :key="block.id"
         class="pixel-block"
+        :class="{ 'scrolling-fade': isScrollingNow }"
         :style="{
           left: `${block.rect.x}px`,
           top: `${block.rect.y}px`,
@@ -225,7 +267,7 @@ onUnmounted(() => {
 
         <!-- Original Text Tooltip on Hover -->
         <div
-          v-if="hoveredBlock?.id === block.id"
+          v-if="hoveredBlock?.id === block.id && !isLiveScroll"
           class="pixel-tooltip"
           :style="{
             bottom: `${block.rect.height + 6}px`,
@@ -233,20 +275,20 @@ onUnmounted(() => {
         >
           <div class="tooltip-label">原文對照</div>
           <div class="tooltip-text">{{ block.original_text }}</div>
-          <div class="tooltip-hint">單擊複製譯文 · 按 Tab 切換側邊滾動清單</div>
+          <div class="tooltip-hint">單擊複製譯文 · 按 Tab 切換側邊清單</div>
         </div>
       </div>
     </template>
 
     <!-- ================= MODE 2: 側邊滾動對照清單 (Scrollable Sidebar) ================= -->
     <template v-if="displayMode === 'sidebar'">
-      <!-- Screen Text Location Markers / Highlights on the left -->
       <div
         v-for="block in blocks"
         :key="'marker-' + block.id"
         class="screen-marker"
         :class="{
           active: activeSidebarBlockId === block.id || hoveredBlock?.id === block.id,
+          'scrolling-fade': isScrollingNow,
         }"
         :style="{
           left: `${block.rect.x}px`,
@@ -262,7 +304,6 @@ onUnmounted(() => {
         <span class="marker-badge">#{{ block.id + 1 }}</span>
       </div>
 
-      <!-- Right Scrollable Drawer / Side Panel -->
       <aside class="sidebar-drawer">
         <div class="sidebar-header">
           <div class="sidebar-title-row">
@@ -276,7 +317,6 @@ onUnmounted(() => {
             </button>
           </div>
 
-          <!-- Search Input -->
           <div class="sidebar-search">
             <input
               v-model="searchQuery"
@@ -288,8 +328,7 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- Scrollable Cards Container (Supports Mouse Wheel / Trackpad Scrolling) -->
-        <div ref="sidebarListRef" class="sidebar-list">
+        <div class="sidebar-list">
           <div
             v-for="(block, idx) in filteredBlocks"
             :id="`sidebar-item-${block.id}`"
@@ -313,12 +352,10 @@ onUnmounted(() => {
               </button>
             </div>
 
-            <!-- Translated Text (Primary) -->
             <div class="card-translation">
               {{ block.translated_text }}
             </div>
 
-            <!-- Original Text (Reference) -->
             <div class="card-original">
               <span class="original-tag">原文</span>
               <span class="original-text">{{ block.original_text }}</span>
@@ -354,11 +391,15 @@ onUnmounted(() => {
   inset: 0;
   width: 100vw;
   height: 100vh;
-  background-color: rgba(15, 23, 42, 0.06);
+  background-color: rgba(15, 23, 42, 0.05);
   user-select: none;
   cursor: default;
   overflow: hidden;
   z-index: 99999;
+}
+
+.overlay-container.live-mode {
+  background-color: transparent !important;
 }
 
 /* ================= Top Pill Toolbar ================= */
@@ -369,7 +410,7 @@ onUnmounted(() => {
   transform: translateX(-50%);
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
   background: rgba(30, 41, 59, 0.94);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
@@ -381,6 +422,11 @@ onUnmounted(() => {
   z-index: 100000;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   animation: fadeInDown 0.2s ease-out;
+}
+
+.floating-toolbar.live-glow {
+  border-color: #10b981;
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.35);
 }
 
 @keyframes fadeInDown {
@@ -409,6 +455,43 @@ onUnmounted(() => {
   background-color: #38bdf8;
   border-radius: 50%;
   box-shadow: 0 0 8px #38bdf8;
+}
+
+.pulse-dot.live {
+  background-color: #34d399;
+  box-shadow: 0 0 10px #34d399;
+  animation: pulse 1s infinite alternate;
+}
+
+@keyframes pulse {
+  from { transform: scale(0.9); opacity: 0.7; }
+  to { transform: scale(1.2); opacity: 1; }
+}
+
+.live-toggle-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #cbd5e1;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.live-toggle-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: white;
+}
+
+.live-toggle-btn.active {
+  background: rgba(16, 185, 129, 0.25);
+  border-color: #10b981;
+  color: #34d399;
+  font-weight: 600;
 }
 
 .mode-switcher {
@@ -447,7 +530,18 @@ onUnmounted(() => {
   font-size: 12px;
   color: #94a3b8;
   border-left: 1px solid rgba(255, 255, 255, 0.15);
-  padding-left: 12px;
+  padding-left: 10px;
+}
+
+.scrolling-hint {
+  color: #38bdf8;
+  font-weight: 600;
+  animation: blink 0.5s infinite alternate;
+}
+
+@keyframes blink {
+  from { opacity: 0.5; }
+  to { opacity: 1; }
 }
 
 .toolbar-actions {
@@ -483,6 +577,30 @@ onUnmounted(() => {
   color: white;
 }
 
+/* ================= Live Status Bottom Pill ================= */
+.live-status-pill {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  color: #a7f3d0;
+  padding: 6px 18px;
+  border-radius: 9999px;
+  font-size: 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+  z-index: 100000;
+  animation: fadeInUp 0.25s ease-out;
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translate(-50%, 10px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
 /* ================= MODE 1: 原地文字塊 ================= */
 .pixel-block {
   position: absolute;
@@ -496,8 +614,12 @@ onUnmounted(() => {
   line-height: 1.25;
   white-space: pre-wrap;
   word-break: break-word;
-  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  transition: opacity 0.15s ease, transform 0.12s ease;
   z-index: 100;
+}
+
+.pixel-block.scrolling-fade {
+  opacity: 0.15 !important;
 }
 
 .pixel-block:hover {
@@ -562,6 +684,10 @@ onUnmounted(() => {
   z-index: 50;
 }
 
+.screen-marker.scrolling-fade {
+  opacity: 0.15 !important;
+}
+
 .screen-marker:hover,
 .screen-marker.active {
   border: 2px solid #38bdf8;
@@ -583,7 +709,7 @@ onUnmounted(() => {
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
 }
 
-/* ================= MODE 2: 側邊滾動對照面板 (Scrollable Sidebar) ================= */
+/* ================= MODE 2: 側邊滾動對照面板 ================= */
 .sidebar-drawer {
   position: fixed;
   right: 0;
@@ -602,12 +728,8 @@ onUnmounted(() => {
 }
 
 @keyframes slideInRight {
-  from {
-    transform: translateX(100%);
-  }
-  to {
-    transform: translateX(0);
-  }
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
 }
 
 .sidebar-header {
@@ -696,7 +818,6 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
-/* ================= 滾輪捲軸容器 (Scrollable Body) ================= */
 .sidebar-list {
   flex: 1;
   padding: 14px 16px;
@@ -712,17 +833,9 @@ onUnmounted(() => {
   width: 6px;
 }
 
-.sidebar-list::-webkit-scrollbar-track {
-  background: transparent;
-}
-
 .sidebar-list::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.2);
   border-radius: 9999px;
-}
-
-.sidebar-list::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.35);
 }
 
 .sidebar-card {
@@ -842,7 +955,6 @@ kbd {
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-/* ================= 複製提示 Toast ================= */
 .copy-toast {
   position: fixed;
   background: #10b981;
@@ -858,13 +970,7 @@ kbd {
 }
 
 @keyframes popUp {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 </style>
