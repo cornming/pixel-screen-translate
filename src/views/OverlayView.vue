@@ -30,6 +30,15 @@ const blocks = ref<TranslatedBlock[]>([]);
 const displayMode = ref<"inplace" | "sidebar">("inplace");
 const isLiveScroll = ref(false);
 const isScrollingNow = ref(false);
+
+// Snipping Tool Mode State
+const isSnipping = ref(false);
+const isSnippingDragging = ref(false);
+const isSnippingProcessing = ref(false);
+const snipStartX = ref(0);
+const snipStartY = ref(0);
+const snipCurrentRect = ref<{ x: number; y: number; width: number; height: number } | null>(null);
+
 const searchQuery = ref("");
 const hoveredBlock = ref<TranslatedBlock | null>(null);
 const activeSidebarBlockId = ref<number | null>(null);
@@ -39,6 +48,8 @@ const copyToast = ref<{ text: string; x: number; y: number } | null>(null);
 let unlistenTranslateFn: (() => void) | null = null;
 let unlistenScrollFn: (() => void) | null = null;
 let unlistenStatusFn: (() => void) | null = null;
+let unlistenStartSnipFn: (() => void) | null = null;
+let unlistenStopSnipFn: (() => void) | null = null;
 
 const filteredBlocks = computed(() => {
   if (!searchQuery.value.trim()) return blocks.value;
@@ -55,6 +66,59 @@ async function closeOverlay() {
     await invoke("hide_overlay");
   } catch (err) {
     console.error("Failed to hide overlay:", err);
+  }
+}
+
+async function startSnipping() {
+  isSnipping.value = true;
+  snipCurrentRect.value = null;
+  blocks.value = [];
+}
+
+function handleSnipMouseDown(e: MouseEvent) {
+  if (!isSnipping.value || isSnippingProcessing.value) return;
+  isSnippingDragging.value = true;
+  snipStartX.value = e.clientX;
+  snipStartY.value = e.clientY;
+  snipCurrentRect.value = {
+    x: e.clientX,
+    y: e.clientY,
+    width: 0,
+    height: 0,
+  };
+}
+
+function handleSnipMouseMove(e: MouseEvent) {
+  if (!isSnipping.value || !isSnippingDragging.value || isSnippingProcessing.value) return;
+  const x = Math.min(snipStartX.value, e.clientX);
+  const y = Math.min(snipStartY.value, e.clientY);
+  const width = Math.abs(e.clientX - snipStartX.value);
+  const height = Math.abs(e.clientY - snipStartY.value);
+
+  snipCurrentRect.value = { x, y, width, height };
+}
+
+async function handleSnipMouseUp() {
+  if (!isSnipping.value || !isSnippingDragging.value) return;
+  isSnippingDragging.value = false;
+
+  if (snipCurrentRect.value && snipCurrentRect.value.width > 20 && snipCurrentRect.value.height > 20) {
+    isSnippingProcessing.value = true;
+    try {
+      await invoke("translate_selected_region", {
+        x: snipCurrentRect.value.x,
+        y: snipCurrentRect.value.y,
+        width: snipCurrentRect.value.width,
+        height: snipCurrentRect.value.height,
+      });
+    } catch (err) {
+      console.error("Region translation failed:", err);
+    } finally {
+      isSnippingProcessing.value = false;
+      isSnipping.value = false;
+    }
+  } else {
+    snipCurrentRect.value = null;
   }
 }
 
@@ -122,7 +186,12 @@ function toggleMode() {
 
 function handleKeyDown(e: KeyboardEvent) {
   if (e.key === "Escape") {
-    closeOverlay();
+    if (isSnipping.value) {
+      isSnipping.value = false;
+      snipCurrentRect.value = null;
+    } else {
+      closeOverlay();
+    }
   } else if (e.key === "Tab") {
     e.preventDefault();
     toggleMode();
@@ -139,7 +208,6 @@ onMounted(async () => {
     }
   } catch (_) {}
 
-  // 1. Immediately fetch latest translation if already available
   try {
     const latest: any = await invoke("get_latest_translation");
     if (latest && latest.blocks && latest.blocks.length > 0) {
@@ -150,7 +218,6 @@ onMounted(async () => {
     console.warn("Could not fetch latest translation:", err);
   }
 
-  // 2. Listen to translation events for live updates
   try {
     unlistenTranslateFn = await listen<ScreenTranslationResponse>("screen-translated-data", (event) => {
       blocks.value = event.payload.blocks;
@@ -165,6 +232,15 @@ onMounted(async () => {
     unlistenStatusFn = await listen<boolean>("live-scroll-status", (event) => {
       isLiveScroll.value = event.payload;
     });
+
+    unlistenStartSnipFn = await listen("start-snipping", () => {
+      startSnipping();
+    });
+
+    unlistenStopSnipFn = await listen("stop-snipping", () => {
+      isSnipping.value = false;
+      isSnippingProcessing.value = false;
+    });
   } catch (err) {
     console.error("Failed to listen to tauri events:", err);
   }
@@ -175,13 +251,25 @@ onUnmounted(() => {
   if (unlistenTranslateFn) unlistenTranslateFn();
   if (unlistenScrollFn) unlistenScrollFn();
   if (unlistenStatusFn) unlistenStatusFn();
+  if (unlistenStartSnipFn) unlistenStartSnipFn();
+  if (unlistenStopSnipFn) unlistenStopSnipFn();
 });
 </script>
 
 <template>
-  <div class="overlay-container" :class="{ 'live-mode': isLiveScroll }" @click.self="closeOverlay">
+  <div
+    class="overlay-container"
+    :class="{
+      'live-mode': isLiveScroll,
+      'snipping-mode': isSnipping,
+    }"
+    @mousedown="handleSnipMouseDown"
+    @mousemove="handleSnipMouseMove"
+    @mouseup="handleSnipMouseUp"
+    @click.self="!isSnipping && closeOverlay()"
+  >
     <!-- Top Floating Pixel-style Pill Toolbar -->
-    <div class="floating-toolbar" :class="{ 'live-glow': isLiveScroll }">
+    <div v-if="!isSnipping" class="floating-toolbar" :class="{ 'live-glow': isLiveScroll }">
       <div class="toolbar-brand">
         <span class="pulse-dot" :class="{ live: isLiveScroll }"></span>
         <span class="brand-text">{{ isLiveScroll ? "滾輪動態翻譯中" : "Pixel 螢幕翻譯" }}</span>
@@ -195,7 +283,12 @@ onUnmounted(() => {
         title="按 Ctrl+Alt+W 開啟/關閉滾輪即時跟隨"
       >
         <span class="wheel-icon">🖱️</span>
-        <span>{{ isLiveScroll ? "動態滾輪追蹤：開" : "動態滾輪追蹤：關" }}</span>
+        <span>{{ isLiveScroll ? "動態滾輪：開" : "動態滾輪：關" }}</span>
+      </button>
+
+      <!-- Snipping Mode Trigger -->
+      <button class="snip-toggle-btn" @click="startSnipping" title="區域框選翻譯 (Ctrl+Alt+S)">
+        <span>✂️ 框選翻譯</span>
       </button>
 
       <!-- Mode Switcher -->
@@ -219,8 +312,8 @@ onUnmounted(() => {
       </div>
 
       <div class="toolbar-info">
-        <span v-if="isScrollingNow" class="scrolling-hint">⚡ 偵測滾動中...</span>
-        <span v-else>共 {{ blocks.length }} 處文字</span>
+        <span v-if="isScrollingNow" class="scrolling-hint">⚡ 滾動中...</span>
+        <span v-else>共 {{ blocks.length }} 處自然段落</span>
       </div>
 
       <div class="toolbar-actions">
@@ -238,13 +331,40 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Live Scroll Tip Floating Pill (when live scroll mode is active) -->
-    <div v-if="isLiveScroll" class="live-status-pill">
-      <span>🟢 滾輪穿透已啟用：滾動滑鼠滾輪，畫面內容將自動即時更新翻譯（按 <kbd>Ctrl+Alt+W</kbd> 退出）</span>
+    <!-- Snipping Banner Prompt -->
+    <div v-if="isSnipping" class="snipping-banner">
+      <span class="snip-icon">✂️</span>
+      <span v-if="!isSnippingProcessing">請使用滑鼠拖曳框選需要翻譯的畫面區域（按 <kbd>Esc</kbd> 取消）</span>
+      <span v-else class="processing-text">
+        <span class="spinner-small"></span>
+        正在對圈選區域執行 Windows OCR 與翻譯...
+      </span>
+      <button class="snip-cancel-btn" @click="isSnipping = false">取消</button>
+    </div>
+
+    <!-- Snipping Selection Rubber-Band Box -->
+    <div
+      v-if="isSnipping && snipCurrentRect"
+      class="snip-selection-box"
+      :style="{
+        left: `${snipCurrentRect.x}px`,
+        top: `${snipCurrentRect.y}px`,
+        width: `${snipCurrentRect.width}px`,
+        height: `${snipCurrentRect.height}px`,
+      }"
+    >
+      <div class="snip-dimension">
+        {{ Math.round(snipCurrentRect.width) }} × {{ Math.round(snipCurrentRect.height) }}
+      </div>
+    </div>
+
+    <!-- Live Scroll Tip Floating Pill -->
+    <div v-if="isLiveScroll && !isSnipping" class="live-status-pill">
+      <span>🟢 滾輪穿透中：滾動網頁/PDF即可動態翻譯（按 <kbd>Esc</kbd> 或 <kbd>Ctrl+Alt+W</kbd> 退出）</span>
     </div>
 
     <!-- ================= MODE 1: 原地替換覆蓋 (In-Place Replacement) ================= -->
-    <template v-if="displayMode === 'inplace'">
+    <template v-if="displayMode === 'inplace' && !isSnipping">
       <div
         v-for="block in blocks"
         :key="block.id"
@@ -274,7 +394,7 @@ onUnmounted(() => {
             bottom: `${block.rect.height + 6}px`,
           }"
         >
-          <div class="tooltip-label">原文對照</div>
+          <div class="tooltip-label">原文對照 (完整段落)</div>
           <div class="tooltip-text">{{ block.original_text }}</div>
           <div class="tooltip-hint">單擊複製譯文 · 按 Tab 切換側邊清單</div>
         </div>
@@ -282,7 +402,7 @@ onUnmounted(() => {
     </template>
 
     <!-- ================= MODE 2: 側邊滾動對照清單 (Scrollable Sidebar) ================= -->
-    <template v-if="displayMode === 'sidebar'">
+    <template v-if="displayMode === 'sidebar' && !isSnipping">
       <div
         v-for="block in blocks"
         :key="'marker-' + block.id"
@@ -403,6 +523,92 @@ onUnmounted(() => {
   background-color: transparent !important;
 }
 
+.overlay-container.snipping-mode {
+  background-color: rgba(15, 23, 42, 0.45) !important;
+  cursor: crosshair !important;
+}
+
+/* ================= Snipping Banner & Box ================= */
+.snipping-banner {
+  position: fixed;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(15, 23, 42, 0.94);
+  border: 1px solid #38bdf8;
+  color: #f1f5f9;
+  padding: 8px 20px;
+  border-radius: 9999px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+  font-size: 13px;
+  z-index: 100000;
+  animation: fadeInDown 0.2s ease-out;
+}
+
+.snip-icon {
+  font-size: 16px;
+}
+
+.processing-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #38bdf8;
+}
+
+.spinner-small {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(56, 189, 248, 0.3);
+  border-top-color: #38bdf8;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.snip-cancel-btn {
+  background: rgba(255, 255, 255, 0.1);
+  border: none;
+  color: #cbd5e1;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.snip-cancel-btn:hover {
+  background: rgba(239, 68, 68, 0.85);
+  color: white;
+}
+
+.snip-selection-box {
+  position: absolute;
+  border: 2px dashed #38bdf8;
+  background: rgba(56, 189, 248, 0.12);
+  box-shadow: 0 0 0 99999px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  z-index: 99998;
+}
+
+.snip-dimension {
+  position: absolute;
+  bottom: -22px;
+  left: 0;
+  background: rgba(15, 23, 42, 0.9);
+  color: #38bdf8;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+}
+
 /* ================= Top Pill Toolbar ================= */
 .floating-toolbar {
   position: fixed;
@@ -411,7 +617,7 @@ onUnmounted(() => {
   transform: translateX(-50%);
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   background: rgba(30, 41, 59, 0.94);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
@@ -472,7 +678,7 @@ onUnmounted(() => {
 .live-toggle-btn {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.15);
   color: #cbd5e1;
@@ -493,6 +699,25 @@ onUnmounted(() => {
   border-color: #10b981;
   color: #34d399;
   font-weight: 600;
+}
+
+.snip-toggle-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(56, 189, 248, 0.15);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  color: #38bdf8;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.snip-toggle-btn:hover {
+  background: #0284c7;
+  color: white;
 }
 
 .mode-switcher {
@@ -578,7 +803,6 @@ onUnmounted(() => {
   color: white;
 }
 
-/* ================= Live Status Bottom Pill ================= */
 .live-status-pill {
   position: fixed;
   bottom: 24px;
@@ -608,11 +832,11 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  padding: 1px 4px;
+  padding: 2px 6px;
   border-radius: 3px;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
   cursor: pointer;
-  line-height: 1.25;
+  line-height: 1.35;
   white-space: pre-wrap;
   word-break: break-word;
   transition: opacity 0.15s ease, transform 0.12s ease;
@@ -620,7 +844,7 @@ onUnmounted(() => {
 }
 
 .pixel-block.scrolling-fade {
-  opacity: 0.15 !important;
+  opacity: 0 !important;
 }
 
 .pixel-block:hover {
@@ -645,9 +869,9 @@ onUnmounted(() => {
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
   pointer-events: none;
   font-size: 12px;
-  line-height: 1.4;
-  min-width: 180px;
-  max-width: 340px;
+  line-height: 1.45;
+  min-width: 200px;
+  max-width: 420px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   z-index: 9999;
   backdrop-filter: blur(8px);
@@ -658,7 +882,7 @@ onUnmounted(() => {
   color: #38bdf8;
   font-weight: 600;
   text-transform: uppercase;
-  margin-bottom: 2px;
+  margin-bottom: 3px;
 }
 
 .tooltip-text {
@@ -670,7 +894,7 @@ onUnmounted(() => {
 .tooltip-hint {
   font-size: 10px;
   color: #94a3b8;
-  margin-top: 4px;
+  margin-top: 5px;
   text-align: right;
 }
 
@@ -686,7 +910,7 @@ onUnmounted(() => {
 }
 
 .screen-marker.scrolling-fade {
-  opacity: 0.15 !important;
+  opacity: 0 !important;
 }
 
 .screen-marker:hover,

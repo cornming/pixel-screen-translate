@@ -36,7 +36,7 @@ function onModeChange() {
 async function startScreenTranslation() {
   try {
     isTranslating.value = true;
-    statusMessage.value = "正在截取螢幕並執行本機離線 OCR 辨識與翻譯...";
+    statusMessage.value = "正在截取螢幕並執行多行段落智慧合併與翻譯...";
 
     await syncTargetLanguage();
 
@@ -45,11 +45,21 @@ async function startScreenTranslation() {
     });
 
     detectedCount.value = res.blocks.length;
-    statusMessage.value = `翻譯完成！共辨識並原地替換 ${res.blocks.length} 處文字（覆蓋層已啟動）`;
+    statusMessage.value = `翻譯完成！已智慧合併並原地替換 ${res.blocks.length} 處自然段落`;
   } catch (err: any) {
     statusMessage.value = `發生錯誤: ${err}`;
   } finally {
     isTranslating.value = false;
+  }
+}
+
+async function startSnippingTranslation() {
+  try {
+    await syncTargetLanguage();
+    await invoke("trigger_snipping_mode");
+    statusMessage.value = "已開啟框選模式！請在畫面上拖曳滑鼠圈選欲翻譯的區域。";
+  } catch (err: any) {
+    statusMessage.value = `發生錯誤: ${err}`;
   }
 }
 
@@ -60,7 +70,7 @@ async function toggleLiveScroll() {
     await invoke("set_live_scroll_mode", { enabled: nextState });
     isLiveScrollActive.value = nextState;
     if (nextState) {
-      statusMessage.value = "已啟用滾輪即時跟隨模式！請直接在瀏覽器或文件上滾動滑鼠滾輪，畫面將即時動態翻譯。";
+      statusMessage.value = "已啟用滾輪即時跟隨模式！直接在網頁/PDF上滾動滑鼠滾輪即可動態翻譯。";
     } else {
       statusMessage.value = "已關閉滾輪即時跟隨模式。";
     }
@@ -103,7 +113,7 @@ onMounted(async () => {
         </div>
         <div>
           <h1 class="logo-title">Pixel 螢幕即時翻譯</h1>
-          <p class="logo-sub">原地覆蓋 · 滾輪動態跟隨翻譯 · 全域快捷鍵</p>
+          <p class="logo-sub">多行段落智慧合併 · 0ms 快取 · 滾輪動態跟隨 · 區域框選</p>
         </div>
       </div>
       <div class="badge-online">離線 OCR 運作中</div>
@@ -152,20 +162,32 @@ onMounted(async () => {
             <span class="btn-main-title">
               {{ isLiveScrollActive ? "🟢 滾輪即時跟隨翻譯中 (點擊停用)" : "⚡ 啟動「滾輪即時跟隨翻譯」模式" }}
             </span>
-            <span class="btn-sub-title">自由滾動底層網頁/PDF，畫面滾動停頓時自動即時辨識與原地覆蓋（Ctrl+Alt+W）</span>
+            <span class="btn-sub-title">自由滾動底層網頁/PDF，停頓自動即時翻譯，LRU 0ms 快取（Ctrl+Alt+W）</span>
           </div>
         </button>
 
-        <!-- Button 2: Snapshot Fullscreen Translate -->
-        <button
-          class="primary-btn"
-          :disabled="isTranslating"
-          @click="startScreenTranslation"
-        >
-          <span v-if="!isTranslating" class="btn-icon">📸</span>
-          <span v-else class="spinner"></span>
-          <span>{{ isTranslating ? "正在辨識與翻譯螢幕..." : "定格全螢幕快照翻譯 (Ctrl+Alt+T)" }}</span>
-        </button>
+        <!-- Button Row: Snapshot & Snipping -->
+        <div class="button-row">
+          <!-- Button 2: Snapshot Fullscreen Translate -->
+          <button
+            class="action-btn-half snapshot"
+            :disabled="isTranslating"
+            @click="startScreenTranslation"
+          >
+            <span v-if="!isTranslating" class="btn-icon">📸</span>
+            <span v-else class="spinner"></span>
+            <span>{{ isTranslating ? "正在翻譯..." : "全螢幕快照翻譯 (Ctrl+Alt+T)" }}</span>
+          </button>
+
+          <!-- Button 3: Snipping Tool Mode -->
+          <button
+            class="action-btn-half snipping"
+            @click="startSnippingTranslation"
+          >
+            <span class="btn-icon">✂️</span>
+            <span>區域框選翻譯 (Ctrl+Alt+S)</span>
+          </button>
+        </div>
 
         <div v-if="detectedCount !== null" class="secondary-actions">
           <button class="secondary-btn" @click="showOverlayDirectly">
@@ -181,34 +203,34 @@ onMounted(async () => {
       <!-- Architecture & Status Badges -->
       <section class="grid-cards">
         <div class="status-card">
-          <div class="card-icon green">🖱️</div>
+          <div class="card-icon green">🧠</div>
           <div class="card-info">
-            <div class="card-title">滾輪動態追蹤</div>
-            <div class="card-desc">按 <kbd>Ctrl + Alt + W</kbd> 邊滾動邊自動即時翻譯</div>
+            <div class="card-title">智慧段落合併</div>
+            <div class="card-desc">跨行自動拼合完整長句，翻譯語意最通順</div>
           </div>
         </div>
 
         <div class="status-card">
-          <div class="card-icon blue">📸</div>
+          <div class="card-icon blue">⚡</div>
           <div class="card-info">
-            <div class="card-title">全螢幕定格快照</div>
-            <div class="card-desc">按 <kbd>Ctrl + Alt + T</kbd> 定格畫面原地替換</div>
+            <div class="card-title">LRU 記憶體快取</div>
+            <div class="card-desc">重複詞句 0 毫秒極速秒回，省流抗延遲</div>
           </div>
         </div>
 
         <div class="status-card">
-          <div class="card-icon purple">🔄</div>
+          <div class="card-icon purple">✂️</div>
           <div class="card-info">
-            <div class="card-title">雙模式切換</div>
-            <div class="card-desc">覆蓋層中按 <kbd>Tab</kbd> 切換原地或側邊清單</div>
+            <div class="card-title">滑鼠拖曳框選</div>
+            <div class="card-desc">按 <kbd>Ctrl + Alt + S</kbd> 圈選漫畫或對話框局部翻譯</div>
           </div>
         </div>
 
         <div class="status-card">
           <div class="card-icon amber">❌</div>
           <div class="card-info">
-            <div class="card-title">退出覆蓋層</div>
-            <div class="card-desc">隨時按 <kbd>Esc</kbd> 退出所有覆蓋狀態</div>
+            <div class="card-title">全域隨時退出</div>
+            <div class="card-desc">任何焦點下按 <kbd>Esc</kbd> 立即關閉所有覆蓋</div>
           </div>
         </div>
       </section>
@@ -216,8 +238,8 @@ onMounted(async () => {
 
     <!-- Footer -->
     <footer class="dashboard-footer">
-      <span>Pixel Screen Translate · v0.3.0</span>
-      <span>滾動追蹤：Ctrl+Alt+W · 快照翻譯：Ctrl+Alt+T</span>
+      <span>Pixel Screen Translate · v0.4.0</span>
+      <span>滾動：Ctrl+Alt+W · 框選：Ctrl+Alt+S · 快照：Ctrl+Alt+T</span>
     </footer>
   </div>
 </template>
@@ -395,12 +417,14 @@ onMounted(async () => {
   opacity: 0.9;
 }
 
-.primary-btn {
-  width: 100%;
-  padding: 10px 18px;
-  background: rgba(30, 41, 59, 0.8);
-  border: 1px solid rgba(56, 189, 248, 0.3);
-  color: #38bdf8;
+.button-row {
+  display: flex;
+  gap: 10px;
+}
+
+.action-btn-half {
+  flex: 1;
+  padding: 10px 14px;
   border-radius: 10px;
   font-size: 13px;
   font-weight: 600;
@@ -412,15 +436,28 @@ onMounted(async () => {
   transition: all 0.2s ease;
 }
 
-.primary-btn:hover:not(:disabled) {
+.action-btn-half.snapshot {
+  background: rgba(30, 41, 59, 0.8);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  color: #38bdf8;
+}
+
+.action-btn-half.snapshot:hover:not(:disabled) {
   background: rgba(14, 165, 233, 0.15);
   border-color: #38bdf8;
   color: white;
 }
 
-.primary-btn:disabled {
-  opacity: 0.65;
-  cursor: not-allowed;
+.action-btn-half.snipping {
+  background: rgba(30, 41, 59, 0.8);
+  border: 1px solid rgba(168, 85, 247, 0.4);
+  color: #c084fc;
+}
+
+.action-btn-half.snipping:hover {
+  background: rgba(168, 85, 247, 0.15);
+  border-color: #c084fc;
+  color: white;
 }
 
 .secondary-actions {
@@ -454,9 +491,7 @@ onMounted(async () => {
 }
 
 @keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
+  to { transform: rotate(360deg); }
 }
 
 .status-box {

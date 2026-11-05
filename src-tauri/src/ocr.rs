@@ -32,6 +32,86 @@ pub struct OcrScanResult {
     pub lines: Vec<RecognizedLine>,
 }
 
+/// Intelligently merges lines that belong to the same sentence/paragraph.
+pub fn merge_lines_into_paragraphs(lines: Vec<RecognizedLine>) -> Vec<RecognizedLine> {
+    if lines.is_empty() {
+        return lines;
+    }
+
+    let mut merged: Vec<RecognizedLine> = Vec::new();
+
+    for next_line in lines {
+        if next_line.text.trim().is_empty() {
+            continue;
+        }
+
+        if let Some(prev) = merged.last_mut() {
+            let prev_text = prev.text.trim();
+            // Check if prev line ends with strong sentence terminator
+            let ends_with_terminator = prev_text.ends_with('.')
+                || prev_text.ends_with('?')
+                || prev_text.ends_with('!')
+                || prev_text.ends_with('。')
+                || prev_text.ends_with('！')
+                || prev_text.ends_with('？')
+                || prev_text.ends_with(':')
+                || prev_text.ends_with('：');
+
+            let vertical_gap = next_line.rect.y - (prev.rect.y + prev.rect.height);
+            let avg_height = (prev.rect.height + next_line.rect.height) / 2.0;
+            let within_line_spacing = vertical_gap >= -5.0 && vertical_gap <= avg_height * 1.35;
+
+            // Check horizontal alignment / overlap
+            let x_overlap = (prev.rect.x + prev.rect.width).min(next_line.rect.x + next_line.rect.width)
+                - prev.rect.x.max(next_line.rect.x);
+            let similar_left_margin = (prev.rect.x - next_line.rect.x).abs() <= 50.0;
+            let horizontally_aligned = x_overlap > 10.0 || similar_left_margin;
+
+            // Check line height similarity (avoid merging title with small body text)
+            let height_ratio = prev.rect.height / next_line.rect.height.max(1.0);
+            let height_similar = height_ratio >= 0.6 && height_ratio <= 1.6;
+
+            if !ends_with_terminator && within_line_spacing && horizontally_aligned && height_similar {
+                // Merge next_line into prev!
+                let is_hyphenated = prev.text.ends_with('-');
+                if is_hyphenated {
+                    let mut trimmed = prev.text.trim_end_matches('-').to_string();
+                    trimmed.push_str(next_line.text.trim());
+                    prev.text = trimmed;
+                } else {
+                    let prev_last_char = prev.text.chars().last().unwrap_or(' ');
+                    let next_first_char = next_line.text.chars().next().unwrap_or(' ');
+                    if prev_last_char.is_alphanumeric() && next_first_char.is_alphanumeric() && prev_last_char.is_ascii() {
+                        prev.text = format!("{} {}", prev.text.trim(), next_line.text.trim());
+                    } else {
+                        prev.text = format!("{}{}", prev.text.trim(), next_line.text.trim());
+                    }
+                }
+
+                // Expand bounding box
+                let min_x = prev.rect.x.min(next_line.rect.x);
+                let min_y = prev.rect.y.min(next_line.rect.y);
+                let max_x = (prev.rect.x + prev.rect.width).max(next_line.rect.x + next_line.rect.width);
+                let max_y = (prev.rect.y + prev.rect.height).max(next_line.rect.y + next_line.rect.height);
+
+                prev.rect = BoundingBox {
+                    x: min_x,
+                    y: min_y,
+                    width: (max_x - min_x).max(1.0),
+                    height: (max_y - min_y).max(1.0),
+                };
+
+                prev.words.extend(next_line.words);
+                continue;
+            }
+        }
+
+        merged.push(next_line);
+    }
+
+    merged
+}
+
 pub async fn recognize_image_bytes(image_bytes: &[u8], lang_tag: Option<&str>) -> Result<OcrScanResult> {
     // 1. Create or select OCR Engine
     let engine = if let Some(tag) = lang_tag {
@@ -116,8 +196,11 @@ pub async fn recognize_image_bytes(image_bytes: &[u8], lang_tag: Option<&str>) -
         });
     }
 
+    // Merge multi-line broken sentences into complete natural paragraphs
+    let paragraph_lines = merge_lines_into_paragraphs(recognized_lines);
+
     Ok(OcrScanResult {
         text: full_text,
-        lines: recognized_lines,
+        lines: paragraph_lines,
     })
 }
