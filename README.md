@@ -53,6 +53,32 @@
 
 ### 開發模式啟動
 ```powershell
-cd c:\Users\vincent\source\side_projects\pixel-screen-translate
+cd pixel-screen-translate
+npm install
 npm run tauri dev
 ```
+
+### 建置發布版本
+```powershell
+npm run tauri build
+```
+
+---
+
+## 🔒 隱私與安全說明
+
+1. **本機離線 OCR 運算**：
+   - 螢幕畫面辨識採用 Windows 10/11 內建的 `Windows.Media.Ocr` API，所有影像截圖與像素特徵分析均在**本機記憶體中完成**，絕不儲存截圖至硬碟，亦不外傳任何圖片檔案。
+2. **文字翻譯資料傳輸**：
+   - 辨識出的文字字串會透過 HTTPS 請求發送至公開翻譯端點進行翻譯。
+   - **隱私提醒**：若螢幕上顯示密碼、金鑰、個人隱私資料或公司機密文件，請避免執行全螢幕或局部翻譯，以防止文字送出。
+3. **低階鍵盤掛鉤（WH_KEYBOARD_LL）**：
+   - 本專案僅在低階鍵盤掛鉤中針對 `Esc`（關閉翻譯覆蓋層）與 `Ctrl+Alt+S` / `Alt+Shift+S`（啟動框選翻譯）進行按鍵比對。
+   - **絕無記錄、側錄、快取或外傳任何其他按鍵輸入**，程式碼完全開源可受檢驗。
+
+---
+
+## 📄 授權條款 (License)
+
+本專案採用 [MIT License](LICENSE) 開源授權。
+
