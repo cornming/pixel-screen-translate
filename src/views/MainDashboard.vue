@@ -4,6 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 const targetLang = ref("zh-TW");
 const defaultMode = ref("inplace");
+const ocrLang = ref<string>("");
+const installedOcrLanguages = ref<string[]>([]);
 const isTranslating = ref(false);
 const isLiveScrollActive = ref(false);
 const statusMessage = ref("");
@@ -18,6 +20,42 @@ const languageOptions = [
   { code: "de", label: "Deutsch (德文)" },
   { code: "fr", label: "Français (法文)" },
 ];
+
+function formatOcrLanguageLabel(tag: string): string {
+  const map: Record<string, string> = {
+    "en-US": "English (美國英文)",
+    "en-GB": "English (英國英文)",
+    "zh-Hant-TW": "繁體中文 (台灣)",
+    "zh-Hans-CN": "簡體中文 (中國)",
+    "ja-JP": "日本語 (日本)",
+    "ja": "日本語",
+    "ko-KR": "한국어 (韓國)",
+    "ko": "한국어",
+    "de-DE": "Deutsch (德國)",
+    "fr-FR": "Français (法國)",
+    "es-ES": "Español (西班牙)",
+  };
+  return map[tag] || tag;
+}
+
+async function loadOcrLanguages() {
+  try {
+    const list: string[] = await invoke("get_installed_ocr_languages");
+    installedOcrLanguages.value = list;
+    const current: string | null = await invoke("get_current_ocr_language");
+    ocrLang.value = current || "";
+  } catch (err) {
+    console.warn("Failed to get installed OCR languages:", err);
+  }
+}
+
+async function syncOcrLanguage() {
+  try {
+    await invoke("set_ocr_language", { lang: ocrLang.value ? ocrLang.value : null });
+  } catch (err) {
+    console.warn("Failed to set OCR language:", err);
+  }
+}
 
 async function syncTargetLanguage() {
   try {
@@ -89,6 +127,7 @@ async function showOverlayDirectly() {
 
 onMounted(async () => {
   syncTargetLanguage();
+  loadOcrLanguages();
   try {
     const saved = localStorage.getItem("pixel_translate_mode");
     if (saved === "inplace" || saved === "sidebar") {
@@ -122,7 +161,7 @@ onMounted(async () => {
     <!-- Main Content -->
     <main class="dashboard-main">
       <!-- Configuration Cards Grid -->
-      <div class="grid-2col">
+      <div class="grid-config">
         <!-- Target Language Card -->
         <section class="card config-card">
           <label class="section-label">目標翻譯語言</label>
@@ -133,7 +172,21 @@ onMounted(async () => {
               </option>
             </select>
           </div>
-          <p class="hint-text">自動偵測來源語言，並將其翻譯為所選語言。</p>
+          <p class="hint-text">翻譯輸出之目標語言。</p>
+        </section>
+
+        <!-- OCR Source Language Card -->
+        <section class="card config-card">
+          <label class="section-label">OCR 來源語系 (離線辨識)</label>
+          <div class="select-wrapper">
+            <select v-model="ocrLang" class="lang-select" @change="syncOcrLanguage">
+              <option value="">自動（系統預設語系）</option>
+              <option v-for="tag in installedOcrLanguages" :key="tag" :value="tag">
+                {{ formatOcrLanguageLabel(tag) }}
+              </option>
+            </select>
+          </div>
+          <p class="hint-text">Windows 內建之 OCR 語系包。</p>
         </section>
 
         <!-- Default Presentation Mode Card -->
@@ -141,11 +194,11 @@ onMounted(async () => {
           <label class="section-label">預設呈現模式</label>
           <div class="select-wrapper">
             <select v-model="defaultMode" class="lang-select" @change="onModeChange">
-              <option value="inplace">📌 原地覆蓋（Pixel 貼平遮罩）</option>
-              <option value="sidebar">📜 側邊滾動對照（條列閱讀與滾輪）</option>
+              <option value="inplace">📌 原地覆蓋（貼平遮罩）</option>
+              <option value="sidebar">📜 側邊滾動對照（條列閱讀）</option>
             </select>
           </div>
-          <p class="hint-text">覆蓋層中按 <kbd>Tab</kbd> 可隨時在兩種模式間切換。</p>
+          <p class="hint-text">按 <kbd>Tab</kbd> 可隨時在兩模式切換。</p>
         </section>
       </div>
 
@@ -316,10 +369,16 @@ onMounted(async () => {
   overflow-y: auto;
 }
 
-.grid-2col {
+.grid-config {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 12px;
+}
+
+@media (max-width: 620px) {
+  .grid-config {
+    grid-template-columns: 1fr;
+  }
 }
 
 .card {

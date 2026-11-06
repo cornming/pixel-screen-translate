@@ -2,10 +2,12 @@ use reqwest::Client;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tokio::sync::Semaphore;
 
 pub struct Translator {
     client: Client,
     cache: Arc<Mutex<HashMap<(String, String), String>>>,
+    concurrency_limit: Arc<Semaphore>,
 }
 
 impl Translator {
@@ -16,6 +18,7 @@ impl Translator {
                 .build()
                 .unwrap_or_default(),
             cache: Arc::new(Mutex::new(HashMap::new())),
+            concurrency_limit: Arc::new(Semaphore::new(4)),
         }
     }
 
@@ -117,16 +120,18 @@ impl Translator {
             return results;
         }
 
-        // 2. Concurrently fetch only uncached texts
+        // 2. Concurrently fetch only uncached texts with Semaphore concurrency control (max 4 concurrent)
         let mut handles = Vec::new();
         for &idx in &missing_indices {
             let line_clone = lines[idx].trim().to_string();
             let target_clone = target_lang.to_string();
             let client = self.client.clone();
+            let sem = self.concurrency_limit.clone();
 
             handles.push((
                 idx,
                 tokio::spawn(async move {
+                    let _permit = sem.acquire().await.ok();
                     let encoded = urlencoding::encode(&line_clone);
                     let url = format!(
                         "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl={}&dt=t&q={}",
@@ -139,6 +144,10 @@ impl Translator {
                         .await
                     {
                         Ok(resp) => {
+                            if resp.status().as_u16() == 429 {
+                                // Short backoff if rate-limited
+                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                            }
                             if let Ok(json) = resp.json::<Value>().await {
                                 let mut full = String::new();
                                 if let Some(sentences) = json.get(0).and_then(|v| v.as_array()) {

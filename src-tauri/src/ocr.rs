@@ -1,9 +1,25 @@
 use serde::{Deserialize, Serialize};
 use windows::core::{HSTRING, Result};
 use windows::Globalization::Language;
-use windows::Graphics::Imaging::BitmapDecoder;
+use windows::Graphics::Imaging::{BitmapPixelFormat, BitmapDecoder, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
 use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
+
+pub fn get_available_ocr_languages() -> Vec<String> {
+    let mut list = Vec::new();
+    if let Ok(languages) = OcrEngine::AvailableRecognizerLanguages() {
+        if let Ok(size) = languages.Size() {
+            for i in 0..size {
+                if let Ok(lang) = languages.GetAt(i) {
+                    if let Ok(tag) = lang.LanguageTag() {
+                        list.push(tag.to_string());
+                    }
+                }
+            }
+        }
+    }
+    list
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoundingBox {
@@ -110,6 +126,109 @@ pub fn merge_lines_into_paragraphs(lines: Vec<RecognizedLine>) -> Vec<Recognized
     }
 
     merged
+}
+
+pub async fn recognize_rgba_image(
+    rgba_bytes: &[u8],
+    width: u32,
+    height: u32,
+    lang_tag: Option<&str>,
+) -> Result<OcrScanResult> {
+    // 1. Create or select OCR Engine
+    let engine = if let Some(tag) = lang_tag {
+        let lang = Language::CreateLanguage(&HSTRING::from(tag))?;
+        if OcrEngine::IsLanguageSupported(&lang)? {
+            OcrEngine::TryCreateFromLanguage(&lang)?
+        } else {
+            OcrEngine::TryCreateFromUserProfileLanguages()?
+        }
+    } else {
+        OcrEngine::TryCreateFromUserProfileLanguages()?
+    };
+
+    // 2. Direct in-memory RGBA to BGRA swap (sub-millisecond)
+    let mut bgra_bytes = rgba_bytes.to_vec();
+    for chunk in bgra_bytes.chunks_exact_mut(4) {
+        chunk.swap(0, 2);
+    }
+
+    // 3. Create SoftwareBitmap directly from buffer in an isolated scope
+    // so IBuffer and DataWriter are dropped before the .await call
+    let bitmap = {
+        let writer = DataWriter::new()?;
+        writer.WriteBytes(&bgra_bytes)?;
+        let buffer = writer.DetachBuffer()?;
+        SoftwareBitmap::CreateCopyFromBuffer(
+            &buffer,
+            BitmapPixelFormat::Bgra8,
+            width as i32,
+            height as i32,
+        )?
+    };
+    drop(bgra_bytes);
+
+    // 5. Perform OCR
+    let ocr_result = engine.RecognizeAsync(&bitmap)?.await?;
+    let full_text = ocr_result.Text()?.to_string();
+
+    let mut recognized_lines = Vec::new();
+    let lines_view = ocr_result.Lines()?;
+    let line_count = lines_view.Size()?;
+
+    for i in 0..line_count {
+        let line = lines_view.GetAt(i)?;
+        let line_text = line.Text()?.to_string();
+        let words_view = line.Words()?;
+        let word_count = words_view.Size()?;
+
+        let mut words = Vec::new();
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+
+        for j in 0..word_count {
+            let word = words_view.GetAt(j)?;
+            let word_text = word.Text()?.to_string();
+            let rect = word.BoundingRect()?;
+
+            if rect.X < min_x { min_x = rect.X; }
+            if rect.Y < min_y { min_y = rect.Y; }
+            if rect.X + rect.Width > max_x { max_x = rect.X + rect.Width; }
+            if rect.Y + rect.Height > max_y { max_y = rect.Y + rect.Height; }
+
+            words.push(RecognizedWord {
+                text: word_text,
+                rect: BoundingBox {
+                    x: rect.X,
+                    y: rect.Y,
+                    width: rect.Width,
+                    height: rect.Height,
+                },
+            });
+        }
+
+        if !words.is_empty() {
+            recognized_lines.push(RecognizedLine {
+                text: line_text,
+                rect: BoundingBox {
+                    x: min_x,
+                    y: min_y,
+                    width: (max_x - min_x).max(1.0),
+                    height: (max_y - min_y).max(1.0),
+                },
+                words,
+            });
+        }
+    }
+
+    // Merge broken lines into complete natural paragraphs
+    let merged_lines = merge_lines_into_paragraphs(recognized_lines);
+
+    Ok(OcrScanResult {
+        text: full_text,
+        lines: merged_lines,
+    })
 }
 
 pub async fn recognize_image_bytes(image_bytes: &[u8], lang_tag: Option<&str>) -> Result<OcrScanResult> {

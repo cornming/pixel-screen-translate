@@ -8,13 +8,15 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
-use crate::capture::capture_primary_monitor;
+use crate::capture::capture_active_monitor;
 use crate::color::sample_colors;
 use crate::mouse_hook::GlobalInputMonitor;
-use crate::ocr::{recognize_image_bytes, BoundingBox};
+use crate::ocr::{get_available_ocr_languages, recognize_rgba_image, BoundingBox};
 use crate::translate::Translator;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +34,8 @@ pub struct ScreenTranslationResponse {
     pub screen_width: u32,
     pub screen_height: u32,
     pub scale_factor: f32,
+    pub monitor_x: i32,
+    pub monitor_y: i32,
     pub blocks: Vec<TranslatedBlock>,
 }
 
@@ -39,28 +43,46 @@ pub struct AppState {
     pub translator: Arc<Translator>,
     pub latest_translation: Arc<Mutex<Option<ScreenTranslationResponse>>>,
     pub target_lang: Arc<Mutex<String>>,
+    pub ocr_lang: Arc<Mutex<Option<String>>>,
     pub input_monitor: Arc<GlobalInputMonitor>,
     pub is_live_scroll_enabled: Arc<AtomicBool>,
+}
+
+pub fn sync_overlay_to_monitor(overlay: &tauri::WebviewWindow, mon_x: i32, mon_y: i32, width: u32, height: u32) {
+    let _ = overlay.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+        x: mon_x,
+        y: mon_y,
+    }));
+    let _ = overlay.set_size(tauri::Size::Physical(tauri::PhysicalSize {
+        width,
+        height,
+    }));
 }
 
 pub async fn do_translate_screen(
     translator: &Translator,
     target_lang: &str,
+    ocr_lang: Option<&str>,
 ) -> Result<ScreenTranslationResponse, String> {
-    // 1. Capture primary screen
-    let captured = capture_primary_monitor()?;
+    // 1. Capture active screen (cursor-aware multi-monitor)
+    let captured = capture_active_monitor()?;
     let scale = if captured.scale_factor > 0.0 {
         captured.scale_factor
     } else {
         1.0
     };
 
-    // 2. Perform Windows native OCR with smart paragraph merging
-    let ocr_result = recognize_image_bytes(&captured.png_bytes, None)
-        .await
-        .map_err(|e| format!("OCR recognition failed: {}", e))?;
+    // 2. Perform zero-compression OCR directly from raw RGBA buffer
+    let ocr_result = recognize_rgba_image(
+        &captured.image,
+        captured.width,
+        captured.height,
+        ocr_lang,
+    )
+    .await
+    .map_err(|e| format!("OCR recognition failed: {}", e))?;
 
-    // 3. Extract text lines and batch translate with LRU cache
+    // 3. Extract text lines and batch translate with LRU cache & semaphore concurrency
     let original_texts: Vec<String> = ocr_result
         .lines
         .iter()
@@ -101,6 +123,8 @@ pub async fn do_translate_screen(
         screen_width: (captured.width as f32 / scale) as u32,
         screen_height: (captured.height as f32 / scale) as u32,
         scale_factor: scale,
+        monitor_x: captured.monitor_x,
+        monitor_y: captured.monitor_y,
         blocks,
     })
 }
@@ -126,7 +150,8 @@ async fn translate_screen(
     let lang = target_lang.unwrap_or_else(|| {
         state.target_lang.lock().unwrap().clone()
     });
-    do_translate_screen(&state.translator, &lang).await
+    let ocr_l = state.ocr_lang.lock().unwrap().clone();
+    do_translate_screen(&state.translator, &lang, ocr_l.as_deref()).await
 }
 
 #[tauri::command]
@@ -138,13 +163,14 @@ async fn trigger_screen_translation(
     let lang = target_lang.unwrap_or_else(|| {
         state.target_lang.lock().unwrap().clone()
     });
+    let ocr_l = state.ocr_lang.lock().unwrap().clone();
 
     if let Some(overlay) = app_handle.get_webview_window("overlay") {
         let _ = overlay.emit("screen-is-scrolling", ());
         tokio::time::sleep(Duration::from_millis(35)).await;
     }
 
-    let result = do_translate_screen(&state.translator, &lang).await?;
+    let result = do_translate_screen(&state.translator, &lang, ocr_l.as_deref()).await?;
 
     {
         let mut store = state.latest_translation.lock().unwrap();
@@ -152,6 +178,7 @@ async fn trigger_screen_translation(
     }
 
     if let Some(overlay) = app_handle.get_webview_window("overlay") {
+        sync_overlay_to_monitor(&overlay, result.monitor_x, result.monitor_y, (result.screen_width as f32 * result.scale_factor) as u32, (result.screen_height as f32 * result.scale_factor) as u32);
         let _ = overlay.set_ignore_cursor_events(false);
         let _ = overlay.show();
         let _ = overlay.set_focus();
@@ -168,6 +195,9 @@ fn activate_snipping_mode(app_handle: &AppHandle, state: &AppState) {
     state.input_monitor.set_overlay_visible(true);
 
     if let Some(overlay) = app_handle.get_webview_window("overlay") {
+        if let Ok(captured) = capture_active_monitor() {
+            sync_overlay_to_monitor(&overlay, captured.monitor_x, captured.monitor_y, captured.width, captured.height);
+        }
         let _ = overlay.set_ignore_cursor_events(false);
         let _ = overlay.show();
         let _ = overlay.set_focus();
@@ -197,6 +227,7 @@ async fn translate_selected_region(
     let lang = target_lang.unwrap_or_else(|| {
         state.target_lang.lock().unwrap().clone()
     });
+    let ocr_l = state.ocr_lang.lock().unwrap().clone();
 
     // 1. Temporarily clear overlay to capture pristine screen
     if let Some(overlay) = app_handle.get_webview_window("overlay") {
@@ -204,18 +235,23 @@ async fn translate_selected_region(
         tokio::time::sleep(Duration::from_millis(35)).await;
     }
 
-    // 2. Capture screen
-    let captured = capture_primary_monitor()?;
+    // 2. Capture active screen (cursor-aware multi-monitor)
+    let captured = capture_active_monitor()?;
     let scale = if captured.scale_factor > 0.0 {
         captured.scale_factor
     } else {
         1.0
     };
 
-    // 3. Perform Windows native OCR
-    let ocr_result = recognize_image_bytes(&captured.png_bytes, None)
-        .await
-        .map_err(|e| format!("OCR recognition failed: {}", e))?;
+    // 3. Perform zero-compression OCR directly from raw RGBA buffer
+    let ocr_result = recognize_rgba_image(
+        &captured.image,
+        captured.width,
+        captured.height,
+        ocr_l.as_deref(),
+    )
+    .await
+    .map_err(|e| format!("OCR recognition failed: {}", e))?;
 
     // Selection bounds in physical pixels
     let sel_x0 = x * scale;
@@ -262,6 +298,8 @@ async fn translate_selected_region(
         screen_width: (captured.width as f32 / scale) as u32,
         screen_height: (captured.height as f32 / scale) as u32,
         scale_factor: scale,
+        monitor_x: captured.monitor_x,
+        monitor_y: captured.monitor_y,
         blocks,
     };
 
@@ -290,12 +328,16 @@ fn set_live_scroll_mode(
 
     if let Some(overlay) = app_handle.get_webview_window("overlay") {
         if enabled {
+            if let Ok(captured) = capture_active_monitor() {
+                sync_overlay_to_monitor(&overlay, captured.monitor_x, captured.monitor_y, captured.width, captured.height);
+            }
             let _ = overlay.set_ignore_cursor_events(true);
             let _ = overlay.show();
             let _ = overlay.emit("live-scroll-status", true);
 
             let translator = state.translator.clone();
             let target_lang = state.target_lang.lock().unwrap().clone();
+            let ocr_l = state.ocr_lang.lock().unwrap().clone();
             let latest_store = state.latest_translation.clone();
             let overlay_clone = overlay.clone();
 
@@ -303,7 +345,7 @@ fn set_live_scroll_mode(
                 let _ = overlay_clone.emit("screen-is-scrolling", ());
                 tokio::time::sleep(Duration::from_millis(35)).await;
 
-                if let Ok(result) = do_translate_screen(&translator, &target_lang).await {
+                if let Ok(result) = do_translate_screen(&translator, &target_lang, ocr_l.as_deref()).await {
                     {
                         let mut store = latest_store.lock().unwrap();
                         *store = Some(result.clone());
@@ -343,6 +385,22 @@ fn set_target_language(
 }
 
 #[tauri::command]
+fn get_installed_ocr_languages() -> Vec<String> {
+    get_available_ocr_languages()
+}
+
+#[tauri::command]
+fn set_ocr_language(lang: Option<String>, state: tauri::State<'_, AppState>) {
+    let mut current = state.ocr_lang.lock().unwrap();
+    *current = lang;
+}
+
+#[tauri::command]
+fn get_current_ocr_language(state: tauri::State<'_, AppState>) -> Option<String> {
+    state.ocr_lang.lock().unwrap().clone()
+}
+
+#[tauri::command]
 fn show_overlay(
     app_handle: AppHandle,
     state: tauri::State<'_, AppState>,
@@ -369,6 +427,7 @@ pub fn run() {
     let translator = Arc::new(Translator::new());
     let latest_translation = Arc::new(Mutex::new(None));
     let target_lang = Arc::new(Mutex::new("zh-TW".to_string()));
+    let ocr_lang = Arc::new(Mutex::new(None));
     let is_live_scroll_enabled = Arc::new(AtomicBool::new(false));
 
     let app_handle_holder: Arc<Mutex<Option<AppHandle>>> = Arc::new(Mutex::new(None));
@@ -379,6 +438,7 @@ pub fn run() {
 
     let translator_for_hook = translator.clone();
     let target_lang_for_hook = target_lang.clone();
+    let ocr_lang_for_hook = ocr_lang.clone();
     let latest_for_hook = latest_translation.clone();
 
     let input_monitor = Arc::new(GlobalInputMonitor::new(
@@ -392,13 +452,14 @@ pub fn run() {
         move || {
             let translator = translator_for_hook.clone();
             let lang = target_lang_for_hook.lock().unwrap().clone();
+            let ocr_l = ocr_lang_for_hook.lock().unwrap().clone();
             let latest_store = latest_for_hook.clone();
 
             if let Some(ref app) = *holder_clone2.lock().unwrap() {
                 let app_clone = app.clone();
 
                 tauri::async_runtime::spawn(async move {
-                    if let Ok(result) = do_translate_screen(&translator, &lang).await {
+                    if let Ok(result) = do_translate_screen(&translator, &lang, ocr_l.as_deref()).await {
                         {
                             let mut store = latest_store.lock().unwrap();
                             *store = Some(result.clone());
@@ -438,6 +499,7 @@ pub fn run() {
                         let translator = state.translator.clone();
                         let latest_store = state.latest_translation.clone();
                         let target_lang = state.target_lang.lock().unwrap().clone();
+                        let ocr_l = state.ocr_lang.lock().unwrap().clone();
                         let shortcut_str = shortcut.to_string().to_lowercase();
 
                         if shortcut_str.contains("s") {
@@ -453,6 +515,9 @@ pub fn run() {
 
                             if let Some(overlay) = app_handle.get_webview_window("overlay") {
                                 if new_state {
+                                    if let Ok(captured) = capture_active_monitor() {
+                                        sync_overlay_to_monitor(&overlay, captured.monitor_x, captured.monitor_y, captured.width, captured.height);
+                                    }
                                     let _ = overlay.set_ignore_cursor_events(true);
                                     let _ = overlay.show();
                                     let _ = overlay.emit("live-scroll-status", true);
@@ -461,7 +526,7 @@ pub fn run() {
                                     tauri::async_runtime::spawn(async move {
                                         let _ = overlay_clone.emit("screen-is-scrolling", ());
                                         tokio::time::sleep(Duration::from_millis(35)).await;
-                                        if let Ok(result) = do_translate_screen(&translator, &target_lang).await {
+                                        if let Ok(result) = do_translate_screen(&translator, &target_lang, ocr_l.as_deref()).await {
                                             {
                                                 let mut store = latest_store.lock().unwrap();
                                                 *store = Some(result.clone());
@@ -482,10 +547,13 @@ pub fn run() {
                             let input_monitor_clone = state.input_monitor.clone();
                             tauri::async_runtime::spawn(async move {
                                 if let Some(ref ov) = overlay_clone {
+                                    if let Ok(captured) = capture_active_monitor() {
+                                        sync_overlay_to_monitor(ov, captured.monitor_x, captured.monitor_y, captured.width, captured.height);
+                                    }
                                     let _ = ov.emit("screen-is-scrolling", ());
                                     tokio::time::sleep(Duration::from_millis(35)).await;
                                 }
-                                if let Ok(result) = do_translate_screen(&translator, &target_lang).await {
+                                if let Ok(result) = do_translate_screen(&translator, &target_lang, ocr_l.as_deref()).await {
                                     {
                                         let mut store = latest_store.lock().unwrap();
                                         *store = Some(result.clone());
@@ -505,6 +573,14 @@ pub fn run() {
                 })
                 .build(),
         )
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(move |app| {
             *app_handle_holder.lock().unwrap() = Some(app.handle().clone());
 
@@ -513,12 +589,58 @@ pub fn run() {
             let _ = app.global_shortcut().register("Ctrl+Alt+W");
             let _ = app.global_shortcut().register("Ctrl+Alt+S");
             let _ = app.global_shortcut().register("Alt+Shift+S");
+
+            // System Tray Menu & Event Handling
+            let quit_i = MenuItem::with_id(app, "quit", "退出程式", true, None::<&str>)?;
+            let show_i = MenuItem::with_id(app, "show", "開啟控制中心", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
+
+            if let Some(icon) = app.default_window_icon() {
+                let _tray = TrayIconBuilder::new()
+                    .icon(icon.clone())
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .tooltip("Pixel 螢幕即時翻譯")
+                    .on_menu_event(|app, event| {
+                        match event.id.as_ref() {
+                            "quit" => {
+                                app.exit(0);
+                            }
+                            "show" => {
+                                if let Some(win) = app.get_webview_window("main") {
+                                    let _ = win.show();
+                                    let _ = win.unminimize();
+                                    let _ = win.set_focus();
+                                }
+                            }
+                            _ => {}
+                        }
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            let app = tray.app_handle();
+                            if let Some(win) = app.get_webview_window("main") {
+                                let _ = win.show();
+                                let _ = win.unminimize();
+                                let _ = win.set_focus();
+                            }
+                        }
+                    })
+                    .build(app)?;
+            }
+
             Ok(())
         })
         .manage(AppState {
             translator,
             latest_translation,
             target_lang,
+            ocr_lang,
             input_monitor: input_monitor_clone,
             is_live_scroll_enabled: is_live_scroll_clone,
         })
@@ -531,6 +653,9 @@ pub fn run() {
             is_live_scroll_active,
             get_latest_translation,
             set_target_language,
+            get_installed_ocr_languages,
+            set_ocr_language,
+            get_current_ocr_language,
             show_overlay,
             hide_overlay
         ])
